@@ -22,6 +22,7 @@
 
 ## 文档
 
+- [开发指南与阶段门禁](docs/DEVELOPMENT.md)
 - [完整实施计划](docs/PROJECT_PLAN.md)
 - [技术架构](docs/ARCHITECTURE.md)
 - [发布与更新约定](docs/RELEASES.md)
