@@ -7,6 +7,15 @@
 
 namespace dsh::platform {
 
+struct LauncherUpdate {
+    std::string version;
+    std::string url;
+    std::string fallback_url;
+    std::string sha256;
+};
+
+void set_official_update_source(bool official);
+
 std::filesystem::path state_directory();
 std::optional<std::string> find_dsh();
 std::string dsh_version(const std::string& executable);
@@ -17,6 +26,9 @@ std::string node_version();
 std::string npm_version();
 bool install_managed_node(std::string& error);
 bool install_managed_dsh(std::string& error);
+bool update_dsh_at(const std::string& executable, std::string& error);
+std::optional<LauncherUpdate> launcher_update_manifest(std::string& error);
+bool stage_launcher_update(const LauncherUpdate& update, std::string& error);
 bool is_web_running();
 std::optional<std::uint32_t> start_dsh(
     const std::string& executable,

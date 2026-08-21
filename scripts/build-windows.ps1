@@ -9,6 +9,7 @@ $compiler = 'C:\Develop\MinGW64\bin\g++.exe'
 $resourceCompiler = 'C:\Develop\MinGW64\bin\windres.exe'
 $outputDirectory = Join-Path $projectRoot 'build\windows-release'
 $output = Join-Path $outputDirectory 'dsh-launcher.exe'
+$updaterOutput = Join-Path $outputDirectory 'dsh-updater.exe'
 
 if (-not (Test-Path -LiteralPath $compiler)) {
     throw "C++ compiler not found: $compiler"
@@ -43,11 +44,18 @@ $sources = @(
     $resourceObject
 )
 
-& $compiler @flags @sources '-o' $output '-lws2_32' '-lshell32' '-lcomctl32' '-ldwmapi'
+& $compiler @flags @sources '-o' $output '-lws2_32' '-lwinhttp' '-lbcrypt' '-lshell32' '-lcomctl32' '-ldwmapi'
 if ($LASTEXITCODE -ne 0) {
     throw "Windows build failed with exit code $LASTEXITCODE"
+}
+
+& $compiler @flags "$projectRoot\src\updater\main_windows.cpp" $resourceObject '-o' $updaterOutput '-lshell32'
+if ($LASTEXITCODE -ne 0) {
+    throw "Windows updater build failed with exit code $LASTEXITCODE"
 }
 
 $item = Get-Item -LiteralPath $output
 Write-Output "Built: $($item.FullName)"
 Write-Output "Size:  $($item.Length) bytes"
+$updaterItem = Get-Item -LiteralPath $updaterOutput
+Write-Output "Updater: $($updaterItem.FullName) ($($updaterItem.Length) bytes)"

@@ -6,10 +6,14 @@
 #include <dwmapi.h>
 
 #include "core/service.h"
+#include "core/version.h"
+#include "platform/platform.h"
 
 #include <atomic>
+#include <condition_variable>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -21,7 +25,9 @@ constexpr int id_app_icon = 101;
 constexpr UINT message_task = WM_APP + 1;
 constexpr int id_primary = 101;
 constexpr int id_stop = 102;
+constexpr int id_source = 103;
 constexpr UINT_PTR id_auto_close = 201;
+constexpr UINT_PTR id_elapsed = 202;
 constexpr COLORREF background_color = RGB(246, 248, 252);
 constexpr COLORREF surface_color = RGB(255, 255, 255);
 constexpr COLORREF ink_color = RGB(30, 41, 59);
@@ -103,6 +109,15 @@ public:
 
 private:
     struct PostedTask { std::function<void()> action; };
+    struct Confirmation {
+        std::mutex mutex;
+        std::condition_variable changed;
+        bool answered{};
+        bool accepted{};
+        std::wstring title;
+        std::wstring detail;
+        std::wstring context;
+    };
 
     static LRESULT CALLBACK static_window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
         auto* self = reinterpret_cast<LauncherWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
@@ -130,13 +145,22 @@ private:
             if (wparam == id_auto_close) {
                 KillTimer(hwnd_, id_auto_close);
                 DestroyWindow(hwnd_);
+            } else if (wparam == id_elapsed && busy_.load() && operation_started_ != 0) {
+                const auto seconds = (GetTickCount64() - operation_started_) / 1000;
+                set_text(status_label_, operation_status_ + L" · " + std::to_wstring(seconds) + L" 秒");
             }
             return 0;
         case WM_DRAWITEM: draw_button(*reinterpret_cast<DRAWITEMSTRUCT*>(lparam)); return TRUE;
         case WM_CTLCOLORSTATIC: {
             auto dc = reinterpret_cast<HDC>(wparam);
-            SetBkMode(dc, TRANSPARENT);
             const auto control = reinterpret_cast<HWND>(lparam);
+            if (control == action_label_) {
+                SetBkMode(dc, OPAQUE);
+                SetBkColor(dc, surface_color);
+                SetTextColor(dc, ink_color);
+                return reinterpret_cast<LRESULT>(surface_brush_);
+            }
+            SetBkMode(dc, TRANSPARENT);
             SetTextColor(dc, control == status_label_ ? status_color_ : ink_color);
             RECT rect{};
             GetWindowRect(control, &rect);
@@ -146,7 +170,8 @@ private:
         }
         case WM_CTLCOLOREDIT: {
             auto dc = reinterpret_cast<HDC>(wparam);
-            SetBkMode(dc, TRANSPARENT);
+            SetBkMode(dc, OPAQUE);
+            SetBkColor(dc, surface_color);
             SetTextColor(dc, ink_color);
             return reinterpret_cast<LRESULT>(surface_brush_);
         }
@@ -155,7 +180,7 @@ private:
             task->action();
             return 0;
         }
-        case WM_CLOSE: DestroyWindow(hwnd_); return 0;
+        case WM_CLOSE: resolve_confirmation(false); DestroyWindow(hwnd_); return 0;
         case WM_DESTROY: alive_.store(false); PostQuitMessage(0); return 0;
         default: return DefWindowProcW(hwnd_, message, wparam, lparam);
         }
@@ -175,10 +200,18 @@ private:
         return control;
     }
 
+    HWND add_source_button() {
+        auto control = CreateWindowExW(0, L"BUTTON", L"更新源：国内镜像", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+                                       scale(340), scale(224), scale(208), scale(28), hwnd_,
+                                       reinterpret_cast<HMENU>(static_cast<INT_PTR>(id_source)), instance_, nullptr);
+        SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(small_font_), TRUE);
+        return control;
+    }
+
     void create_controls() {
         add_label(L"DeepSeek Harness", 28, 20, 380, 38, title_font_);
         add_label(L"双击即可使用，其余交给启动器", 30, 58, 400, 22, small_font_);
-        add_label(L"v0.1.0-dev", 442, 31, 104, 22, small_font_, SS_RIGHT);
+        add_label(utf8_to_wide(std::string("v") + dsh::launcher_version).c_str(), 442, 31, 104, 22, small_font_, SS_RIGHT);
         status_label_ = add_label(L"正在检查 DSH…", 52, 112, 456, 30, status_font_);
         detail_label_ = add_label(L"这通常只需要一小会儿", 52, 147, 456, 24, normal_font_);
         progress_ = CreateWindowExW(0, PROGRESS_CLASSW, nullptr, WS_CHILD | WS_VISIBLE | PBS_MARQUEE,
@@ -187,6 +220,7 @@ private:
         SendMessageW(progress_, PBM_SETBKCOLOR, 0, RGB(226, 232, 240));
         SendMessageW(progress_, PBM_SETMARQUEE, TRUE, 24);
         add_label(L"执行记录", 30, 231, 160, 22, normal_font_);
+        source_button_ = add_source_button();
         action_label_ = CreateWindowExW(0, L"EDIT", L"",
                                         WS_CHILD | WS_VISIBLE | WS_VSCROLL |
                                             ES_LEFT | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY,
@@ -232,9 +266,11 @@ private:
         const bool disabled = (item.itemState & ODS_DISABLED) != 0;
         const bool pressed = (item.itemState & ODS_SELECTED) != 0;
         const bool primary = item.CtlID == id_primary;
+        const bool source = item.CtlID == id_source;
         COLORREF fill = primary ? primary_color : surface_color;
         COLORREF outline = primary ? primary_color : border_color;
         COLORREF foreground = primary ? RGB(255, 255, 255) : ink_color;
+        if (source) { fill = RGB(239, 246, 255); outline = RGB(191, 219, 254); foreground = primary_color; }
         if (pressed) fill = primary ? RGB(29, 78, 216) : RGB(241, 245, 249);
         if (disabled) { fill = RGB(241, 245, 249); outline = border_color; foreground = disabled_color; }
         HBRUSH brush = CreateSolidBrush(fill);
@@ -244,7 +280,7 @@ private:
         RoundRect(item.hDC, item.rcItem.left, item.rcItem.top, item.rcItem.right, item.rcItem.bottom, 18, 18);
         SetBkMode(item.hDC, TRANSPARENT);
         SetTextColor(item.hDC, foreground);
-        SelectObject(item.hDC, normal_font_);
+        SelectObject(item.hDC, source ? small_font_ : normal_font_);
         RECT text_rect = item.rcItem;
         if (pressed) OffsetRect(&text_rect, 0, 1);
         DrawTextW(item.hDC, text, -1, &text_rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
@@ -255,6 +291,20 @@ private:
     }
 
     void handle_command(int id) {
+        if (id == id_source) {
+            const bool official = !official_source_.load();
+            official_source_.store(official);
+            dsh::platform::set_official_update_source(official);
+            set_text(source_button_, official ? L"更新源：GitHub / 官方" : L"更新源：国内镜像");
+            append_action(official ? L"已切换为 GitHub / npm 官方源" : L"已切换为 Gitee / 国内镜像源");
+            InvalidateRect(source_button_, nullptr, TRUE);
+            return;
+        }
+        if (confirmation_mode_) {
+            resolve_confirmation(id == id_primary);
+            set_busy(id == id_primary ? L"正在准备更新…" : L"已暂不更新", L"请稍候，启动流程将继续");
+            return;
+        }
         if (busy_.load()) return;
         if (id == id_primary) running_ ? open_web() : start_existing();
         else if (id == id_stop) stop();
@@ -276,6 +326,51 @@ private:
             } else {
                 post([this, status] { append_action(utf8_to_wide("已找到 DSH " + status.version)); });
             }
+
+            const auto update_progress = [this](const std::string& step) {
+                post([this, step] {
+                    append_action(utf8_to_wide(step));
+                    set_busy(L"正在更新…", utf8_to_wide(step).c_str());
+                });
+            };
+            post([this] {
+                append_action(L"正在检查启动器更新");
+                set_busy(L"正在检查更新…", L"检查过程在后台进行，不会弹出命令窗口");
+            });
+            const auto launcher_update = service_.update_launcher(
+                update_progress,
+                [this](const std::string& current, const std::string& latest) {
+                    return request_confirmation(
+                        L"发现启动器新版本",
+                        utf8_to_wide(current + "  →  " + latest),
+                        L"确认后将下载并校验，随后自动替换并重启启动器");
+                });
+            if (!launcher_update.message.empty()) {
+                post([this, message = launcher_update.message] { append_action(utf8_to_wide(message)); });
+            }
+            if (launcher_update.completed) {
+                post([this] {
+                    set_busy(L"启动器更新已就绪", L"即将自动替换并重新打开");
+                    set_text(footer_label_, L"请稍候，更新助手将在窗口关闭后完成替换");
+                    SetTimer(hwnd_, id_auto_close, 1200, nullptr);
+                });
+                return;
+            }
+
+            post([this] { append_action(L"正在检查 DSH 更新"); });
+            const auto dsh_update = service_.update_dsh(
+                update_progress,
+                [this](const std::string& current, const std::string& latest, const std::string& executable) {
+                    const auto install_directory = std::filesystem::path(utf8_to_wide(executable)).parent_path();
+                    return request_confirmation(
+                        L"发现 DSH 新版本",
+                        utf8_to_wide(current + "  →  " + latest),
+                        L"将在原安装目录更新：" + install_directory.wstring());
+                });
+            if (!dsh_update.message.empty()) {
+                post([this, message = dsh_update.message] { append_action(utf8_to_wide(message)); });
+            }
+            status = service_.detect();
             if (status.running) {
                 std::string ignored;
                 service_.open_web(ignored);
@@ -322,13 +417,15 @@ private:
     }
 
     void show_ready(const dsh::Status& status, const wchar_t* detail) {
+        KillTimer(hwnd_, id_elapsed);
         busy_.store(false);
         running_ = true;
         status_color_ = success_color;
         set_text(status_label_, L"● DSH 已准备好");
         set_text(detail_label_, detail);
         set_text(primary_button_, L"打开 DSH 网页");
-        set_text(footer_label_, utf8_to_wide("DSH " + status.version + " · 60 秒后自动关闭窗口，服务继续运行"));
+        set_text(stop_button_, L"停止服务");
+        set_text(footer_label_, L"更新检查完成 · 60 秒后关闭窗口，DSH 继续运行");
         SendMessageW(progress_, PBM_SETMARQUEE, FALSE, 0);
         ShowWindow(progress_, SW_HIDE);
         EnableWindow(primary_button_, TRUE);
@@ -338,12 +435,14 @@ private:
     }
 
     void show_stopped() {
+        KillTimer(hwnd_, id_elapsed);
         busy_.store(false);
         running_ = false;
         status_color_ = stopped_color;
         set_text(status_label_, L"● DSH 已停止");
         set_text(detail_label_, L"需要时可以再次一键启动");
         set_text(primary_button_, L"重新启动 DSH");
+        set_text(stop_button_, L"停止服务");
         set_text(footer_label_, L"配置和会话数据已保留");
         ShowWindow(progress_, SW_HIDE);
         EnableWindow(primary_button_, TRUE);
@@ -353,12 +452,14 @@ private:
     }
 
     void show_error(const std::string& error) {
+        KillTimer(hwnd_, id_elapsed);
         busy_.store(false);
         running_ = false;
         status_color_ = error_color;
         set_text(status_label_, L"启动没有完成");
         set_text(detail_label_, utf8_to_wide(error));
         set_text(primary_button_, L"重试");
+        set_text(stop_button_, L"停止服务");
         set_text(footer_label_, L"日志保存在本机应用数据目录");
         ShowWindow(progress_, SW_HIDE);
         EnableWindow(primary_button_, TRUE);
@@ -370,9 +471,14 @@ private:
         busy_.store(true);
         running_ = false;
         status_color_ = primary_color;
+        operation_status_ = status;
+        while (!operation_status_.empty() && (operation_status_.back() == L'…' || operation_status_.back() == L'.')) operation_status_.pop_back();
+        operation_started_ = GetTickCount64();
+        SetTimer(hwnd_, id_elapsed, 1000, nullptr);
         set_text(status_label_, status);
         set_text(detail_label_, detail);
         set_text(primary_button_, L"请稍候…");
+        set_text(stop_button_, L"停止服务");
         set_text(footer_label_, L"正在处理 · 请不要重复打开启动器");
         ShowWindow(progress_, SW_SHOW);
         SendMessageW(progress_, PBM_SETMARQUEE, TRUE, 24);
@@ -399,6 +505,49 @@ private:
         else append_action(L"已使用默认浏览器打开 DSH");
     }
 
+    bool request_confirmation(const std::wstring& title, const std::wstring& detail, const std::wstring& context) {
+        auto confirmation = std::make_shared<Confirmation>();
+        confirmation->title = title;
+        confirmation->detail = detail;
+        confirmation->context = context;
+        post([this, confirmation] { show_confirmation(confirmation); });
+        std::unique_lock lock(confirmation->mutex);
+        confirmation->changed.wait(lock, [this, &confirmation] { return confirmation->answered || !alive_.load(); });
+        return confirmation->answered && confirmation->accepted;
+    }
+
+    void show_confirmation(const std::shared_ptr<Confirmation>& confirmation) {
+        KillTimer(hwnd_, id_elapsed);
+        pending_confirmation_ = confirmation;
+        confirmation_mode_ = true;
+        busy_.store(false);
+        running_ = false;
+        status_color_ = primary_color;
+        set_text(status_label_, confirmation->title);
+        set_text(detail_label_, confirmation->detail);
+        append_action(confirmation->context);
+        set_text(primary_button_, L"立即更新");
+        set_text(stop_button_, L"暂不更新");
+        set_text(footer_label_, L"更新完成并校验通过后才会继续启动");
+        ShowWindow(progress_, SW_HIDE);
+        EnableWindow(primary_button_, TRUE);
+        EnableWindow(stop_button_, TRUE);
+        InvalidateRect(hwnd_, nullptr, TRUE);
+    }
+
+    void resolve_confirmation(bool accepted) {
+        const auto confirmation = pending_confirmation_;
+        pending_confirmation_.reset();
+        confirmation_mode_ = false;
+        if (!confirmation) return;
+        {
+            std::lock_guard lock(confirmation->mutex);
+            confirmation->accepted = accepted;
+            confirmation->answered = true;
+        }
+        confirmation->changed.notify_all();
+    }
+
     int scale(int value) const { return MulDiv(value, static_cast<int>(dpi_), 96); }
 
     void append_action(const std::wstring& action) {
@@ -413,6 +562,7 @@ private:
         set_text(action_label_, joined);
         SendMessageW(action_label_, EM_SETSEL, static_cast<WPARAM>(-1), static_cast<LPARAM>(-1));
         SendMessageW(action_label_, WM_VSCROLL, SB_BOTTOM, 0);
+        RedrawWindow(action_label_, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW | RDW_FRAME);
     }
 
     void set_text(HWND control, const std::wstring& text) { SetWindowTextW(control, text.c_str()); }
@@ -432,6 +582,7 @@ private:
     HWND progress_{};
     HWND primary_button_{};
     HWND stop_button_{};
+    HWND source_button_{};
     HFONT title_font_{};
     HFONT status_font_{};
     HFONT normal_font_{};
@@ -441,10 +592,15 @@ private:
     UINT dpi_{96};
     COLORREF status_color_{primary_color};
     std::vector<std::wstring> actions_;
+    ULONGLONG operation_started_{};
+    std::wstring operation_status_;
     dsh::Service service_;
     std::atomic_bool alive_{true};
     std::atomic_bool busy_{false};
+    std::atomic_bool official_source_{false};
     bool running_{};
+    bool confirmation_mode_{};
+    std::shared_ptr<Confirmation> pending_confirmation_;
 };
 
 }  // namespace

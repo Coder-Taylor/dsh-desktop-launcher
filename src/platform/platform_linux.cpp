@@ -18,6 +18,8 @@
 
 namespace dsh::platform {
 namespace {
+
+bool use_official_source{};
 std::string trim(std::string value) {
     const auto first = value.find_first_not_of(" \t\r\n");
     if (first == std::string::npos) return {};
@@ -39,6 +41,8 @@ std::optional<std::string> extract_version(const std::string& output) {
     return std::nullopt;
 }
 }  // namespace
+
+void set_official_update_source(bool official) { use_official_source = official; }
 
 std::filesystem::path state_directory() {
     if (const char* state = std::getenv("XDG_STATE_HOME"); state && *state) {
@@ -70,6 +74,21 @@ bool install_managed_node(std::string& error) {
 }
 bool install_managed_dsh(std::string& error) {
     error = "Linux DSH 托管安装将在 Linux 打包阶段接入。";
+    return false;
+}
+bool update_dsh_at(const std::string& executable, std::string& error) {
+    const auto prefix = std::filesystem::path(executable).parent_path().string();
+    const auto result = std::system(("npm install --prefix \"" + prefix + "\" @deepseek-ai/dsh --no-fund --no-audit").c_str());
+    if (result == 0) return true;
+    error = "无法更新原安装目录中的 DSH。";
+    return false;
+}
+std::optional<LauncherUpdate> launcher_update_manifest(std::string& error) {
+    error = "Linux 启动器自更新将在 Linux 发布包阶段接入。";
+    return std::nullopt;
+}
+bool stage_launcher_update(const LauncherUpdate&, std::string& error) {
+    error = "Linux 启动器自更新将在 Linux 发布包阶段接入。";
     return false;
 }
 bool is_web_running() {

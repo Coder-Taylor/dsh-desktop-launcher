@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "channel": "stable",
+  "version": "0.1.0-dev",
+  "publishedAt": "2026-08-21T00:00:00Z",
+  "minimumDirectUpgradeVersion": "0.1.0-dev",
+  "mandatory": false,
+  "releaseNotesUrl": "https://github.com/Coder-Taylor/dsh-desktop-launcher/releases",
+  "packages": {
+    "windows-x64": {
+      "url": "https://gitee.com/taylorchengitee/dsh-desktop-launcher/releases/download/v0.1.0-dev/dsh-launcher-windows-x64.zip",
+      "fallbackUrl": "https://github.com/Coder-Taylor/dsh-desktop-launcher/releases/download/v0.1.0-dev/dsh-launcher-windows-x64.zip",
+      "size": 0,
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  }
+}

@@ -1,6 +1,8 @@
 #include "core/service.h"
 
 #include "platform/platform.h"
+#include "core/semver.h"
+#include "core/version.h"
 
 #include <fstream>
 
@@ -11,7 +13,7 @@ Service::Service()
       pid_file_(state_directory_ / "dsh-web.pid"),
       log_(state_directory_) {
     std::filesystem::create_directories(state_directory_);
-    log_.info("Launcher service initialized; version=0.1.0-dev");
+    log_.info(std::string("Launcher service initialized; version=") + launcher_version);
 }
 
 Status Service::detect() {
@@ -100,6 +102,92 @@ bool Service::ensure_installed(const Progress& progress, std::string& error) {
     }
     progress("DSH 安装完成并已通过校验");
     return true;
+}
+
+UpdateResult Service::update_dsh(const Progress& progress, const ConfirmDshUpdate& confirm) {
+    UpdateResult result;
+    const auto status = detect();
+    result.current = status.version;
+    if (!status.installed || status.version.empty()) {
+        result.message = "未找到可更新的 DSH";
+        return result;
+    }
+    const auto latest = platform::latest_dsh_version();
+    if (!latest) {
+        result.message = "暂时无法连接 DSH 更新源";
+        log_.error("DSH update check failed");
+        return result;
+    }
+    result.checked = true;
+    result.latest = *latest;
+    if (!version::is_newer(*latest, status.version)) {
+        result.message = "DSH 已是最新版本 " + status.version;
+        return result;
+    }
+
+    result.available = true;
+    if (!confirm(status.version, *latest, status.executable)) {
+        result.message = "已暂不更新 DSH，继续使用当前版本 " + status.version;
+        return result;
+    }
+    if (status.running) {
+        progress("正在停止旧版本 DSH，更新完成后会自动重启");
+        std::string stop_error;
+        if (!stop(stop_error)) {
+            result.message = "当前 DSH 服务无法安全停止，已取消更新：" + stop_error;
+            return result;
+        }
+    }
+    progress("发现 DSH " + *latest + "，正在后台更新");
+    std::string error;
+    if (!platform::update_dsh_at(status.executable, error)) {
+        result.message = "DSH 更新失败，稍后将自动重试";
+        log_.error("DSH update failed: " + error);
+        return result;
+    }
+    const auto updated_version = platform::dsh_version(status.executable);
+    if (!version::is_newer(updated_version, status.version) && updated_version != *latest) {
+        result.message = "DSH 更新校验未通过";
+        log_.error("DSH update verification failed; expected=" + *latest + "; actual=" + updated_version);
+        return result;
+    }
+    result.completed = true;
+    result.message = "DSH 已在原安装目录更新到 " + updated_version;
+    log_.info("DSH updated in place; from=" + status.version + "; to=" + updated_version + "; executable=" + status.executable);
+    return result;
+}
+
+UpdateResult Service::update_launcher(const Progress& progress, const ConfirmLauncherUpdate& confirm) {
+    UpdateResult result;
+    result.current = launcher_version;
+    std::string error;
+    const auto update = platform::launcher_update_manifest(error);
+    if (!update) {
+        result.message = "暂时无法连接启动器更新源";
+        log_.error("Launcher update check failed: " + error);
+        return result;
+    }
+    result.checked = true;
+    result.latest = update->version;
+    if (!version::is_newer(update->version, launcher_version)) {
+        result.message = std::string("启动器已是最新版本 ") + launcher_version;
+        return result;
+    }
+    result.available = true;
+    if (!confirm(launcher_version, update->version)) {
+        result.message = std::string("已暂不更新启动器，继续使用 ") + launcher_version;
+        return result;
+    }
+    progress("发现启动器 " + update->version + "，正在后台下载");
+    if (!platform::stage_launcher_update(*update, error)) {
+        result.message = "启动器更新下载失败，稍后将自动重试";
+        log_.error("Launcher update staging failed: " + error);
+        return result;
+    }
+    result.completed = true;
+    result.message = "启动器 " + update->version + " 已就绪，关闭窗口后自动替换";
+    log_.info("Launcher update staged; from=" + std::string(launcher_version) + "; to=" + update->version);
+    return result;
 }
 
 std::optional<std::string> Service::latest_version() { return platform::latest_dsh_version(); }
