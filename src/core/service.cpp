@@ -103,7 +103,10 @@ bool Service::ensure_installed(const Progress& progress, std::string& error) {
 }
 
 std::optional<std::string> Service::latest_version() { return platform::latest_dsh_version(); }
+std::string Service::node_version() { return platform::node_version(); }
+std::string Service::npm_version() { return platform::npm_version(); }
 const std::filesystem::path& Service::log_path() const noexcept { return log_.path(); }
+std::filesystem::path Service::service_log_path() const { return state_directory_ / "logs" / "dsh-web.log"; }
 
 std::optional<std::uint32_t> Service::read_pid() const {
     std::ifstream stream(pid_file_);

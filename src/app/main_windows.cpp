@@ -4,10 +4,12 @@
 #include <windows.h>
 #include <commctrl.h>
 #include <dwmapi.h>
+#include <shellapi.h>
 
 #include "core/service.h"
 
 #include <atomic>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <string>
@@ -17,11 +19,17 @@
 namespace {
 
 constexpr wchar_t window_class_name[] = L"DshLauncherWindow";
+constexpr wchar_t launcher_version[] = L"0.1.0-dev";
 constexpr int id_app_icon = 101;
 constexpr UINT message_task = WM_APP + 1;
 constexpr int id_primary = 101;
 constexpr int id_stop = 102;
+constexpr int id_details = 103;
+constexpr int id_open_logs = 104;
 constexpr UINT_PTR id_auto_close = 201;
+constexpr int collapsed_width = 586;
+constexpr int collapsed_height = 500;
+constexpr int expanded_height = 704;
 constexpr COLORREF background_color = RGB(246, 248, 252);
 constexpr COLORREF surface_color = RGB(255, 255, 255);
 constexpr COLORREF ink_color = RGB(30, 41, 59);
@@ -52,7 +60,7 @@ public:
     explicit LauncherWindow(HINSTANCE instance) : instance_(instance) {}
     ~LauncherWindow() {
         alive_.store(false);
-        for (auto font : {title_font_, status_font_, normal_font_, small_font_}) if (font) DeleteObject(font);
+        for (auto font : {title_font_, status_font_, section_font_, normal_font_, small_font_}) if (font) DeleteObject(font);
         if (background_brush_) DeleteObject(background_brush_);
         if (surface_brush_) DeleteObject(surface_brush_);
     }
@@ -76,13 +84,14 @@ public:
 
         title_font_ = create_font(22, dpi_, FW_BOLD);
         status_font_ = create_font(15, dpi_, FW_SEMIBOLD);
+        section_font_ = create_font(11, dpi_, FW_SEMIBOLD);
         normal_font_ = create_font(11, dpi_);
         small_font_ = create_font(9, dpi_);
         background_brush_ = CreateSolidBrush(background_color);
         surface_brush_ = CreateSolidBrush(surface_color);
         hwnd_ = CreateWindowExW(0, window_class_name, L"DSH Launcher",
                                 WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-                                CW_USEDEFAULT, CW_USEDEFAULT, scale(586), scale(500),
+                                CW_USEDEFAULT, CW_USEDEFAULT, scale(collapsed_width), scale(collapsed_height),
                                 nullptr, nullptr, instance_, this);
         return hwnd_ != nullptr;
     }
@@ -141,12 +150,13 @@ private:
             RECT rect{};
             GetWindowRect(control, &rect);
             MapWindowPoints(HWND_DESKTOP, hwnd_, reinterpret_cast<POINT*>(&rect), 2);
-            return reinterpret_cast<LRESULT>((control == status_label_ || control == detail_label_ || control == action_label_)
+            return reinterpret_cast<LRESULT>((control == status_label_ || control == detail_label_)
                                                  ? surface_brush_ : background_brush_);
         }
-        case WM_CTLCOLOREDIT: {
+        case WM_CTLCOLORLISTBOX: {
             auto dc = reinterpret_cast<HDC>(wparam);
-            SetBkMode(dc, TRANSPARENT);
+            SetBkMode(dc, OPAQUE);
+            SetBkColor(dc, surface_color);
             SetTextColor(dc, ink_color);
             return reinterpret_cast<LRESULT>(surface_brush_);
         }
@@ -168,9 +178,9 @@ private:
         return control;
     }
 
-    HWND add_button(const wchar_t* text, int id, int x, int y, int width) {
+    HWND add_button(const wchar_t* text, int id, int x, int y, int width, int height = 48) {
         auto control = CreateWindowExW(0, L"BUTTON", text, WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
-                                       scale(x), scale(y), scale(width), scale(48), hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), instance_, nullptr);
+                                       scale(x), scale(y), scale(width), scale(height), hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), instance_, nullptr);
         SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(normal_font_), TRUE);
         return control;
     }
@@ -178,7 +188,7 @@ private:
     void create_controls() {
         add_label(L"DeepSeek Harness", 28, 20, 380, 38, title_font_);
         add_label(L"双击即可使用，其余交给启动器", 30, 58, 400, 22, small_font_);
-        add_label(L"v0.1.0-dev", 442, 31, 104, 22, small_font_, SS_RIGHT);
+        add_label((std::wstring(L"v") + launcher_version).c_str(), 442, 31, 104, 22, small_font_, SS_RIGHT);
         status_label_ = add_label(L"正在检查 DSH…", 52, 112, 456, 30, status_font_);
         detail_label_ = add_label(L"这通常只需要一小会儿", 52, 147, 456, 24, normal_font_);
         progress_ = CreateWindowExW(0, PROGRESS_CLASSW, nullptr, WS_CHILD | WS_VISIBLE | PBS_MARQUEE,
@@ -186,18 +196,31 @@ private:
         SendMessageW(progress_, PBM_SETBARCOLOR, 0, primary_color);
         SendMessageW(progress_, PBM_SETBKCOLOR, 0, RGB(226, 232, 240));
         SendMessageW(progress_, PBM_SETMARQUEE, TRUE, 24);
-        add_label(L"执行记录", 30, 231, 160, 22, normal_font_);
-        action_label_ = CreateWindowExW(0, L"EDIT", L"",
-                                        WS_CHILD | WS_VISIBLE | WS_VSCROLL |
-                                            ES_LEFT | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY,
-                                        scale(48), scale(265), scale(472), scale(72),
-                                        hwnd_, nullptr, instance_, nullptr);
-        SendMessageW(action_label_, WM_SETFONT, reinterpret_cast<WPARAM>(normal_font_), TRUE);
+        add_label(L"执行记录", 30, 228, 160, 24, section_font_);
+        details_button_ = add_button(L"详细信息", id_details, 436, 220, 110, 32);
+        action_list_ = CreateWindowExW(0, L"LISTBOX", L"",
+                                       WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL |
+                                           LBS_NOINTEGRALHEIGHT | LBS_NOTIFY,
+                                       scale(48), scale(265), scale(472), scale(72),
+                                       hwnd_, nullptr, instance_, nullptr);
+        SendMessageW(action_list_, WM_SETFONT, reinterpret_cast<WPARAM>(normal_font_), TRUE);
         primary_button_ = add_button(L"请稍候…", id_primary, 28, 363, 334);
         stop_button_ = add_button(L"停止服务", id_stop, 376, 363, 170);
         EnableWindow(primary_button_, FALSE);
         EnableWindow(stop_button_, FALSE);
         footer_label_ = add_label(L"正在本地检查 · 更新将在后台静默进行", 28, 427, 518, 22, small_font_, SS_CENTER);
+
+        details_heading_ = add_label(L"运行环境与路径", 30, 466, 220, 24, section_font_);
+        details_list_ = CreateWindowExW(0, L"LISTBOX", L"",
+                                        WS_CHILD | WS_VSCROLL | WS_HSCROLL | LBS_NOINTEGRALHEIGHT,
+                                        scale(48), scale(502), scale(472), scale(112),
+                                        hwnd_, nullptr, instance_, nullptr);
+        SendMessageW(details_list_, WM_SETFONT, reinterpret_cast<WPARAM>(small_font_), TRUE);
+        open_logs_button_ = add_button(L"打开日志目录", id_open_logs, 366, 630, 180, 38);
+        ShowWindow(details_heading_, SW_HIDE);
+        ShowWindow(details_list_, SW_HIDE);
+        ShowWindow(open_logs_button_, SW_HIDE);
+        refresh_details();
     }
 
     void paint() {
@@ -218,6 +241,9 @@ private:
         SelectObject(dc, surface_brush_);
         SelectObject(dc, surface_pen);
         RoundRect(dc, scale(28), scale(256), scale(548), scale(348), scale(20), scale(20));
+        if (details_expanded_) {
+            RoundRect(dc, scale(28), scale(494), scale(548), scale(622), scale(20), scale(20));
+        }
         SelectObject(dc, old_brush);
         SelectObject(dc, old_pen);
         DeleteObject(shadow);
@@ -255,6 +281,8 @@ private:
     }
 
     void handle_command(int id) {
+        if (id == id_details) { toggle_details(); return; }
+        if (id == id_open_logs) { open_logs(); return; }
         if (busy_.load()) return;
         if (id == id_primary) running_ ? open_web() : start_existing();
         else if (id == id_stop) stop();
@@ -276,6 +304,14 @@ private:
             } else {
                 post([this, status] { append_action(utf8_to_wide("已找到 DSH " + status.version)); });
             }
+            const auto node_version = service_.node_version();
+            const auto npm_version = service_.npm_version();
+            post([this, status, node_version, npm_version] {
+                last_status_ = status;
+                node_version_ = node_version;
+                npm_version_ = npm_version;
+                refresh_details();
+            });
             if (status.running) {
                 std::string ignored;
                 service_.open_web(ignored);
@@ -324,6 +360,7 @@ private:
     void show_ready(const dsh::Status& status, const wchar_t* detail) {
         busy_.store(false);
         running_ = true;
+        last_status_ = status;
         status_color_ = success_color;
         set_text(status_label_, L"● DSH 已准备好");
         set_text(detail_label_, detail);
@@ -334,12 +371,14 @@ private:
         EnableWindow(primary_button_, TRUE);
         EnableWindow(stop_button_, TRUE);
         SetTimer(hwnd_, id_auto_close, 60000, nullptr);
+        refresh_details();
         InvalidateRect(hwnd_, nullptr, TRUE);
     }
 
     void show_stopped() {
         busy_.store(false);
         running_ = false;
+        last_status_.running = false;
         status_color_ = stopped_color;
         set_text(status_label_, L"● DSH 已停止");
         set_text(detail_label_, L"需要时可以再次一键启动");
@@ -349,6 +388,7 @@ private:
         EnableWindow(primary_button_, TRUE);
         EnableWindow(stop_button_, FALSE);
         append_action(L"后台服务已停止");
+        refresh_details();
         InvalidateRect(hwnd_, nullptr, TRUE);
     }
 
@@ -399,20 +439,97 @@ private:
         else append_action(L"已使用默认浏览器打开 DSH");
     }
 
+    void toggle_details() {
+        details_expanded_ = !details_expanded_;
+        const int visibility = details_expanded_ ? SW_SHOW : SW_HIDE;
+        ShowWindow(details_heading_, visibility);
+        ShowWindow(details_list_, visibility);
+        ShowWindow(open_logs_button_, visibility);
+        set_text(details_button_, details_expanded_ ? L"收起信息" : L"详细信息");
+        SetWindowPos(hwnd_, nullptr, 0, 0, scale(collapsed_width),
+                     scale(details_expanded_ ? expanded_height : collapsed_height),
+                     SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        if (details_expanded_) KillTimer(hwnd_, id_auto_close);
+        InvalidateRect(hwnd_, nullptr, TRUE);
+    }
+
+    void open_logs() {
+        const auto directory = service_.log_path().parent_path();
+        const auto result = reinterpret_cast<std::intptr_t>(
+            ShellExecuteW(hwnd_, L"open", directory.c_str(), nullptr, nullptr, SW_SHOWNORMAL));
+        if (result <= 32) show_error("无法打开日志目录。");
+        else append_action(L"已打开日志目录");
+    }
+
+    void refresh_details() {
+        if (!details_list_) return;
+        SendMessageW(details_list_, LB_RESETCONTENT, 0, 0);
+        const auto add = [this](const std::wstring& value) {
+            SendMessageW(details_list_, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(value.c_str()));
+        };
+        const auto value_or = [](const std::string& value, const wchar_t* fallback) {
+            return value.empty() ? std::wstring(fallback) : utf8_to_wide(value);
+        };
+        add(L"DSH 当前版本：" + value_or(last_status_.version, last_status_.installed ? L"未知" : L"未安装"));
+        add(L"DSH 最新版本：尚未检查（阶段 3 启用）");
+        if (last_status_.installed && !last_status_.executable.empty()) {
+            const auto executable = std::filesystem::path(utf8_to_wide(last_status_.executable));
+            add(L"DSH 安装目录：" + executable.parent_path().wstring());
+        } else {
+            add(L"DSH 安装目录：未检测到");
+        }
+        add(std::wstring(L"启动器版本：") + launcher_version);
+        add(L"启动器最新版本：尚未检查（阶段 4 启用）");
+#if defined(_M_X64) || defined(__x86_64__)
+        add(L"启动器构建：Release · x64 · 开发通道");
+#elif defined(_M_ARM64) || defined(__aarch64__)
+        add(L"启动器构建：Release · ARM64 · 开发通道");
+#else
+        add(L"启动器构建：Release · x86 · 开发通道");
+#endif
+        add(L"Node.js：" + value_or(node_version_, L"未检测到"));
+        add(L"npm：" + value_or(npm_version_, L"未检测到"));
+        add(L"更新源：国内镜像（默认）");
+        add(L"启动器日志：" + service_.log_path().wstring());
+        add(L"DSH 服务日志：" + service_.service_log_path().wstring());
+
+        HDC dc = GetDC(details_list_);
+        const auto old_font = SelectObject(dc, small_font_);
+        int extent = scale(440);
+        const int count = static_cast<int>(SendMessageW(details_list_, LB_GETCOUNT, 0, 0));
+        for (int index = 0; index < count; ++index) {
+            const int length = static_cast<int>(SendMessageW(details_list_, LB_GETTEXTLEN, index, 0));
+            std::wstring row(static_cast<std::size_t>(length) + 1, L'\0');
+            SendMessageW(details_list_, LB_GETTEXT, index, reinterpret_cast<LPARAM>(row.data()));
+            SIZE size{};
+            GetTextExtentPoint32W(dc, row.c_str(), length, &size);
+            extent = (std::max)(extent, static_cast<int>(size.cx) + scale(24));
+        }
+        SelectObject(dc, old_font);
+        ReleaseDC(details_list_, dc);
+        SendMessageW(details_list_, LB_SETHORIZONTALEXTENT, extent, 0);
+    }
+
     int scale(int value) const { return MulDiv(value, static_cast<int>(dpi_), 96); }
 
     void append_action(const std::wstring& action) {
         if (action.empty()) return;
-        actions_.push_back(L"• " + action);
-        if (actions_.size() > 100) actions_.erase(actions_.begin());
-        std::wstring joined;
-        for (const auto& item : actions_) {
-            if (!joined.empty()) joined += L"\r\n";
-            joined += item;
+        const auto row = L"• " + action;
+        if (SendMessageW(action_list_, LB_GETCOUNT, 0, 0) >= 100) {
+            SendMessageW(action_list_, LB_DELETESTRING, 0, 0);
         }
-        set_text(action_label_, joined);
-        SendMessageW(action_label_, EM_SETSEL, static_cast<WPARAM>(-1), static_cast<LPARAM>(-1));
-        SendMessageW(action_label_, WM_VSCROLL, SB_BOTTOM, 0);
+        SendMessageW(action_list_, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(row.c_str()));
+        const auto count = SendMessageW(action_list_, LB_GETCOUNT, 0, 0);
+        if (count > 0) SendMessageW(action_list_, LB_SETTOPINDEX, count - 1, 0);
+        HDC dc = GetDC(action_list_);
+        const auto old_font = SelectObject(dc, normal_font_);
+        SIZE size{};
+        GetTextExtentPoint32W(dc, row.c_str(), static_cast<int>(row.size()), &size);
+        SelectObject(dc, old_font);
+        ReleaseDC(action_list_, dc);
+        const auto previous_extent = static_cast<int>(SendMessageW(action_list_, LB_GETHORIZONTALEXTENT, 0, 0));
+        SendMessageW(action_list_, LB_SETHORIZONTALEXTENT,
+                     (std::max)(previous_extent, static_cast<int>(size.cx) + scale(24)), 0);
     }
 
     void set_text(HWND control, const std::wstring& text) { SetWindowTextW(control, text.c_str()); }
@@ -427,35 +544,38 @@ private:
     HWND hwnd_{};
     HWND status_label_{};
     HWND detail_label_{};
-    HWND action_label_{};
+    HWND action_list_{};
     HWND footer_label_{};
     HWND progress_{};
     HWND primary_button_{};
     HWND stop_button_{};
+    HWND details_button_{};
+    HWND details_heading_{};
+    HWND details_list_{};
+    HWND open_logs_button_{};
     HFONT title_font_{};
     HFONT status_font_{};
+    HFONT section_font_{};
     HFONT normal_font_{};
     HFONT small_font_{};
     HBRUSH background_brush_{};
     HBRUSH surface_brush_{};
     UINT dpi_{96};
     COLORREF status_color_{primary_color};
-    std::vector<std::wstring> actions_;
     dsh::Service service_;
+    dsh::Status last_status_;
+    std::string node_version_;
+    std::string npm_version_;
     std::atomic_bool alive_{true};
     std::atomic_bool busy_{false};
     bool running_{};
+    bool details_expanded_{};
 };
 
 }  // namespace
 
 int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int show_command) {
-    using SetDpiAwareness = BOOL(WINAPI*)(HANDLE);
-    if (const auto user32 = GetModuleHandleW(L"user32.dll")) {
-        if (const auto set_awareness = reinterpret_cast<SetDpiAwareness>(GetProcAddress(user32, "SetProcessDpiAwarenessContext"))) {
-            set_awareness(reinterpret_cast<HANDLE>(-4));
-        }
-    }
+    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_PROGRESS_CLASS | ICC_STANDARD_CLASSES};
     InitCommonControlsEx(&controls);
     LauncherWindow window(instance);

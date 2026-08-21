@@ -30,7 +30,10 @@ public:
     bool open_web(std::string& error);
     bool ensure_installed(const Progress& progress, std::string& error);
     std::optional<std::string> latest_version();
+    std::string node_version();
+    std::string npm_version();
     [[nodiscard]] const std::filesystem::path& log_path() const noexcept;
+    [[nodiscard]] std::filesystem::path service_log_path() const;
 
 private:
     std::optional<std::uint32_t> read_pid() const;
