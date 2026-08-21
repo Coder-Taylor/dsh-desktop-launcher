@@ -1,0 +1,32 @@
+# Build outputs
+bin/
+build/
+obj/
+artifacts/
+publish/
+.cache/
+
+# IDE and local settings
+.vs/
+.vscode/
+*.user
+*.suo
+
+# Local launcher state and secrets
+.env
+launcher.local.json
+update-state.json
+*.log
+
+# Temporary downloads and packages
+*.tmp
+*.partial
+*.zip
+*.tar.gz
+*.AppImage
+*.msi
+*.exe
+
+# OS metadata
+Thumbs.db
+.DS_Store
