@@ -29,7 +29,7 @@
 | npm 更新尝试结构化日志 | 已编译验证 | 每次尝试记录 registry、BAT 标准模式、耗时、退出码、Job 峰值内存和限制，并同步到运行详情 |
 | npm 更新过程实时诊断 | 已编译验证 | npm 子进程输出会即时写入运行详情和 `launcher.log`；静默时每 15 秒记录一次已用时心跳 |
 | 国内镜像真实 DSH 更新 | 通过 | 2026-08-27 已在原目录完成升级；npm 日志以 `exit 0` / `info ok` 结束，`dsh.cmd --version` 已校验为 `0.1.1-rc.2` |
-| 启动器 Gitee Release 自更新 | 通过 | 从公开 beta.1 Release 下载 687687 字节 ZIP，SHA-256 校验通过；中文工作区路径下完成隐藏替换并重启，目标 EXE 哈希与发布包一致 |
+| 启动器 Gitee Release 自更新 | 通过 | 从公开 beta.1、beta.2 Release 完成两轮真实下载与 SHA-256 校验；中文工作区路径下隐藏替换并重启，最终 EXE 哈希与 beta.2 发布包一致 |
 | Windows 外部命令无控制台窗口 | 通过 | 常规命令使用 `CREATE_NO_WINDOW`；自更新改用隐藏 PowerShell；winget 提权命令使用 `SW_HIDE`，MSI 安装界面保留 |
 
 ## 当前环境实测
@@ -62,6 +62,10 @@
   ZIP 已验证但目标 EXE 未替换；改为带 UTF-8 BOM 的 PowerShell `LiteralPath` 脚本，并移除会令 PowerShell
   提前退出的 `DETACHED_PROCESS` 后，中文路径回归成功。测试前后哈希分别为驱动器构建哈希和已发布
   beta.1 EXE 哈希 `5acf4631b6cbc54e903c3fa2a39c0a0823a2863b352b8ae26ce52f07db3724bb`，且新版进程已重启。
+- beta.2 发布并公开清单后再次运行同一中文路径回归：清单返回 `0.1.1-beta.2`，更新驱动器返回
+  `replacement_scheduled=true`，替换后 EXE 哈希为
+  `e107e4279fa26e9e596062da8016a99c66847a16c80ad4a59f0e298497b8bf68`，与 beta.2 ZIP 内发布 EXE
+  完全一致；重启进程存在并已在测试结束后清理。
 
 此前记录的网络现象如下，供代理/TUN 诊断使用：
 
