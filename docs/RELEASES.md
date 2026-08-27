@@ -5,7 +5,8 @@
 - GitHub 代码主仓库：<https://github.com/Coder-Taylor/dsh-desktop-launcher>
 - Gitee 国内发布与镜像仓库：<https://gitee.com/taylorchengitee/dsh-desktop-launcher>
 
-GitHub 是唯一开发主线；Gitee 接收同步结果，并作为中国大陆用户的首选 Release 下载源。GitHub Release 是国内用户的备用源。
+GitHub 保留为代码主线与 Release 备用源；**Gitee 是发布主仓库和默认 Release 下载源**。发布时先保证
+Gitee 的产物完整可用，再同步相同产物到 GitHub；两个仓库不同时独立修改，避免代码分叉。
 
 ## 版本号
 
@@ -34,11 +35,11 @@ SHA256SUMS.txt
 2. 自动构建全部目标；
 3. 运行单元测试和启动冒烟测试；
 4. 生成 SHA-256 与更新清单；
-5. 创建 GitHub Release 草稿；
-6. 同步完全相同的产物到 Gitee Release；
+5. 创建并核对 Gitee Release 草稿；
+6. 同步完全相同的产物到 GitHub Release 草稿；
 7. 核对两个源的版本和哈希；
-8. 先公开 GitHub/Gitee 两端的 Release；
-9. 最后发布更新清单，国内默认清单将 Gitee 写为首选 URL，避免客户端看到尚未上传完成的版本。
+8. 先公开 Gitee，再公开 GitHub 的 Release；
+9. 最后发布更新清单，默认清单将 Gitee 写为首选 URL，避免客户端看到尚未上传完成的版本。
 
 ## 回退规则
 

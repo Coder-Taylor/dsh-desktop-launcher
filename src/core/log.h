@@ -13,6 +13,7 @@ public:
     void info(const std::string& message);
     void error(const std::string& message);
     [[nodiscard]] const std::filesystem::path& path() const noexcept;
+    [[nodiscard]] const std::filesystem::path& fallback_path() const noexcept;
 
 private:
     void write(const char* level, const std::string& message);
@@ -20,8 +21,8 @@ private:
     void cleanup_old_logs();
 
     std::filesystem::path path_;
+    std::filesystem::path fallback_path_;
     std::mutex mutex_;
 };
 
 }  // namespace dsh
-

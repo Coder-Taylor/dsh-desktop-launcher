@@ -262,7 +262,7 @@ An unofficial cross-platform desktop launcher for DeepSeek Harness with one-clic
 
 - Windows/Linux 自动构建；
 - 生成哈希和更新清单；
-- 创建 GitHub Release 并同步 Gitee；
+- 创建 Gitee Release 并同步 GitHub；
 - 添加冒烟测试和安装包扫描。
 
 验收：创建一个版本 Tag 后能够得到可验证的双平台 Release 草稿。

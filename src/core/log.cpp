@@ -4,22 +4,43 @@
 #include <fstream>
 #include <iomanip>
 #include <sstream>
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
 
 namespace dsh {
 namespace {
 constexpr std::uintmax_t max_log_size = 512 * 1024;
 constexpr int log_copies = 3;
+
+std::string process_suffix() {
+#ifdef _WIN32
+    return std::to_string(GetCurrentProcessId());
+#else
+    return std::to_string(getpid());
+#endif
+}
 }  // namespace
 
 Log::Log(const std::filesystem::path& state_directory)
     : path_(state_directory / "logs" / "launcher.log") {
-    std::filesystem::create_directories(path_.parent_path());
+    std::error_code error;
+    std::filesystem::create_directories(path_.parent_path(), error);
+    error.clear();
+    auto temporary = std::filesystem::temp_directory_path(error);
+    if (error || temporary.empty()) temporary = std::filesystem::current_path(error);
+    fallback_path_ = temporary / "DshLauncher" / "logs" /
+                     ("launcher-" + process_suffix() + ".log");
+    std::filesystem::create_directories(fallback_path_.parent_path(), error);
     cleanup_old_logs();
 }
 
 void Log::info(const std::string& message) { write("INFO", message); }
 void Log::error(const std::string& message) { write("ERROR", message); }
 const std::filesystem::path& Log::path() const noexcept { return path_; }
+const std::filesystem::path& Log::fallback_path() const noexcept { return fallback_path_; }
 
 void Log::write(const char* level, const std::string& original_message) {
     std::lock_guard lock(mutex_);
@@ -37,9 +58,19 @@ void Log::write(const char* level, const std::string& original_message) {
 #else
     localtime_r(&time, &local);
 #endif
-    std::ofstream stream(path_, std::ios::app);
-    stream << std::put_time(&local, "%Y-%m-%d %H:%M:%S") << ' ' << std::left
-           << std::setw(5) << level << ' ' << message << '\n';
+    std::ostringstream line;
+    line << std::put_time(&local, "%Y-%m-%d %H:%M:%S") << ' ' << std::left
+         << std::setw(5) << level << ' ' << message << '\n';
+    const auto append = [&line](const std::filesystem::path& target) {
+        std::ofstream stream(target, std::ios::app);
+        if (!stream) return false;
+        stream << line.str();
+        stream.flush();
+        return stream.good();
+    };
+    // A locked or redirected %LOCALAPPDATA% must not make diagnostics disappear.
+    // Keep a second copy under %TEMP% so startup/update failures remain inspectable.
+    if (!append(path_)) append(fallback_path_);
 }
 
 void Log::rotate_if_needed() {
@@ -72,4 +103,3 @@ void Log::cleanup_old_logs() {
 }
 
 }  // namespace dsh
-

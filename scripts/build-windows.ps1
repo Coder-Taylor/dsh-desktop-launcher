@@ -43,7 +43,7 @@ $sources = @(
     $resourceObject
 )
 
-& $compiler @flags @sources '-o' $output '-lws2_32' '-lshell32' '-lcomctl32' '-ldwmapi'
+& $compiler @flags @sources '-o' $output '-lws2_32' '-lshell32' '-lwinhttp' '-lole32' '-luuid' '-lcomctl32' '-ldwmapi'
 if ($LASTEXITCODE -ne 0) {
     throw "Windows build failed with exit code $LASTEXITCODE"
 }
