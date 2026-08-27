@@ -217,7 +217,8 @@ std::optional<std::string> extract_version(const std::string& output) {
 }
 
 bool run_elevated_and_wait(const std::wstring& file, const std::wstring& parameters,
-                           std::string& error, const std::atomic_bool* cancel = nullptr) {
+                           std::string& error, const std::atomic_bool* cancel = nullptr,
+                           int show = SW_SHOWNORMAL) {
     SHELLEXECUTEINFOW execute{};
     execute.cbSize = sizeof(execute);
     execute.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
@@ -225,7 +226,7 @@ bool run_elevated_and_wait(const std::wstring& file, const std::wstring& paramet
     execute.lpVerb = L"runas";
     execute.lpFile = file.c_str();
     execute.lpParameters = parameters.c_str();
-    execute.nShow = SW_SHOWNORMAL;
+    execute.nShow = show;
     if (!ShellExecuteExW(&execute) || !execute.hProcess) {
         const DWORD code = GetLastError();
         error = code == ERROR_CANCELLED
@@ -957,7 +958,7 @@ bool install_system_node(bool official_source, const std::filesystem::path& dire
         const std::wstring params = L"/d /s /c \"winget install -e --id OpenJS.NodeJS.LTS "
             L"--accept-source-agreements --accept-package-agreements --location \"" +
             target.wstring() + L"\"\"";
-        if (!run_elevated_and_wait(L"cmd.exe", params, error, cancel)) return false;
+        if (!run_elevated_and_wait(L"cmd.exe", params, error, cancel, SW_HIDE)) return false;
     } else {
         std::vector<unsigned char> index_data;
         if (!download("https://npmmirror.com/mirrors/node/index.json", index_data, error,
@@ -1266,7 +1267,7 @@ bool uninstall_launcher_owned_node(std::string& error) {
     }
     const std::wstring parameters = L"/d /s /c \"winget uninstall -e --id OpenJS.NodeJS.LTS "
                                     L"--accept-source-agreements\"";
-    if (!run_elevated_and_wait(L"cmd.exe", parameters, error, nullptr)) return false;
+    if (!run_elevated_and_wait(L"cmd.exe", parameters, error, nullptr, SW_HIDE)) return false;
     if (std::filesystem::exists(owned / "node.exe")) {
         error = "Node.js 卸载器已结束，但安装目录仍存在。为保护其他程序，未删除该目录。";
         return false;
@@ -1449,6 +1450,16 @@ bool update_launcher(const LauncherUpdate& update, std::string& error,
         error = "无法创建启动器更新目录：" + filesystem_error.message();
         return false;
     }
+    for (std::filesystem::directory_iterator iterator(updates, filesystem_error), end;
+         iterator != end && !filesystem_error; iterator.increment(filesystem_error)) {
+        const auto name = iterator->path().filename().wstring();
+        if (iterator->is_regular_file(filesystem_error) &&
+            name.starts_with(L"apply-launcher-") &&
+            (iterator->path().extension() == L".ps1" || iterator->path().extension() == L".cmd")) {
+            std::filesystem::remove(iterator->path(), filesystem_error);
+            filesystem_error.clear();
+        }
+    }
     std::filesystem::remove_all(staging, filesystem_error);
     std::filesystem::create_directories(staging, filesystem_error);
     if (filesystem_error) {
@@ -1548,24 +1559,40 @@ bool update_launcher(const LauncherUpdate& update, std::string& error,
         return false;
     }
     const std::filesystem::path current(executable_buffer, executable_buffer + length);
-    const auto script = updates / ("apply-launcher-" + std::to_string(GetCurrentProcessId()) + ".cmd");
+    const auto script = updates / ("apply-launcher-" + std::to_string(GetCurrentProcessId()) + ".ps1");
     std::ofstream script_stream(script, std::ios::binary | std::ios::trunc);
     if (!script_stream) {
         error = "无法创建启动器更新助手。";
         std::filesystem::remove_all(staging, filesystem_error);
         return false;
     }
-    script_stream << "@echo off\r\n"
-                  << "setlocal\r\n"
-                  << "for /l %%N in (1,1,30) do (\r\n"
-                  << "  copy /Y \"" << path_utf8(replacement) << "\" \"" << path_utf8(current) << "\" >nul 2>&1\r\n"
-                  << "  if not errorlevel 1 goto start\r\n"
-                  << "  timeout /t 1 /nobreak >nul\r\n"
-                  << ")\r\n"
-                  << "exit /b 1\r\n"
-                  << ":start\r\n"
-                  << "start \"\" \"" << path_utf8(current) << "\"\r\n"
-                  << "del \"%~f0\"\r\n";
+    const auto powershell_literal = [](std::string value) {
+        std::size_t position{};
+        while ((position = value.find('\'', position)) != std::string::npos) {
+            value.insert(position, 1, '\'');
+            position += 2;
+        }
+        return value;
+    };
+    // Windows PowerShell 5.1 treats a BOM-less UTF-8 script as the active ANSI
+    // code page.  That corrupts launcher paths containing CJK characters and
+    // leaves the verified update staged but unapplied.  A UTF-8 BOM plus
+    // LiteralPath keeps replacement fully Unicode-safe and the hidden process
+    // avoids flashing a console window during self-update.
+    script_stream.write("\xEF\xBB\xBF", 3);
+    script_stream << "$source = '" << powershell_literal(path_utf8(replacement)) << "'\r\n"
+                  << "$target = '" << powershell_literal(path_utf8(current)) << "'\r\n"
+                  << "for ($attempt = 0; $attempt -lt 30; $attempt++) {\r\n"
+                  << "  try {\r\n"
+                  << "    Copy-Item -LiteralPath $source -Destination $target -Force -ErrorAction Stop\r\n"
+                  << "    Start-Process -FilePath $target -ErrorAction Stop\r\n"
+                  << "    Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue\r\n"
+                  << "    exit 0\r\n"
+                  << "  } catch {\r\n"
+                  << "    Start-Sleep -Seconds 1\r\n"
+                  << "  }\r\n"
+                  << "}\r\n"
+                  << "exit 1\r\n";
     script_stream.close();
     if (!script_stream) {
         error = "无法写入启动器更新助手。";
@@ -1573,7 +1600,9 @@ bool update_launcher(const LauncherUpdate& update, std::string& error,
         std::filesystem::remove_all(staging, filesystem_error);
         return false;
     }
-    const auto command = std::wstring(L"cmd.exe /d /s /c \"\"") + script.wstring() + L"\"\"";
+    const auto command = std::wstring(
+        L"powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass "
+        L"-WindowStyle Hidden -File \"") + script.wstring() + L"\"";
     std::vector<wchar_t> mutable_command(command.begin(), command.end());
     mutable_command.push_back(L'\0');
     STARTUPINFOW startup{};
@@ -1582,7 +1611,7 @@ bool update_launcher(const LauncherUpdate& update, std::string& error,
     startup.wShowWindow = SW_HIDE;
     PROCESS_INFORMATION process{};
     if (!CreateProcessW(nullptr, mutable_command.data(), nullptr, nullptr, FALSE,
-                        CREATE_NO_WINDOW | DETACHED_PROCESS, nullptr, nullptr,
+                        CREATE_NO_WINDOW, nullptr, nullptr,
                         &startup, &process)) {
         error = "无法启动启动器更新助手。";
         std::filesystem::remove(script, filesystem_error);

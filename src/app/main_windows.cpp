@@ -24,7 +24,7 @@ namespace {
 
 constexpr wchar_t window_class_name[] = L"DshLauncherWindow";
 constexpr wchar_t choice_dialog_class_name[] = L"DshLauncherChoiceDialog";
-constexpr wchar_t launcher_version[] = L"0.1.1-beta.1";
+constexpr wchar_t launcher_version[] = L"0.1.1-beta.2";
 constexpr int id_app_icon = 101;
 constexpr UINT message_task = WM_APP + 1;
 constexpr UINT message_choice_result = WM_APP + 2;
@@ -1158,7 +1158,7 @@ private:
         const bool dsh_update = status.installed && latest && !status.version.empty() &&
                                 dsh::version::is_newer(*latest, status.version);
         const bool launcher_update_available = launcher &&
-                                               dsh::version::is_newer(launcher->version, "0.1.1-beta.1");
+                                               dsh::version::is_newer(launcher->version, "0.1.1-beta.2");
         const auto dsh_choice = dsh_update ? latest : std::optional<std::string>{};
         const auto launcher_choice = launcher_update_available ? launcher
                                                                 : std::optional<dsh::platform::LauncherUpdate>{};

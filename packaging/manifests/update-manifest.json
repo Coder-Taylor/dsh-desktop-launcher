@@ -1,17 +1,17 @@
 {
   "schemaVersion": 1,
   "channel": "beta",
-  "version": "0.1.1-beta.1",
-  "publishedAt": "2026-08-27T00:00:00Z",
+  "version": "0.1.1-beta.2",
+  "publishedAt": "2026-08-27T09:45:55Z",
   "minimumDirectUpgradeVersion": "0.1.0",
   "mandatory": false,
-  "releaseNotesUrl": "https://gitee.com/taylorchengitee/dsh-desktop-launcher/releases/tag/v0.1.1-beta.1",
+  "releaseNotesUrl": "https://gitee.com/taylorchengitee/dsh-desktop-launcher/releases/tag/v0.1.1-beta.2",
   "packages": {
     "windows-x64": {
-      "url": "https://gitee.com/taylorchengitee/dsh-desktop-launcher/releases/download/v0.1.1-beta.1/dsh-launcher-windows-x64.zip",
-      "fallbackUrl": "https://github.com/Coder-Taylor/dsh-desktop-launcher/releases/download/v0.1.1-beta.1/dsh-launcher-windows-x64.zip",
-      "size": 687687,
-      "sha256": "618bc5db31e480f42883dff9c48358a8868158c8784aa9c11f6e0d50d0378e1b"
+      "url": "https://gitee.com/taylorchengitee/dsh-desktop-launcher/releases/download/v0.1.1-beta.2/dsh-launcher-windows-x64.zip",
+      "fallbackUrl": "https://github.com/Coder-Taylor/dsh-desktop-launcher/releases/download/v0.1.1-beta.2/dsh-launcher-windows-x64.zip",
+      "size": 689655,
+      "sha256": "ecf416f88a06314a55fc21fcd7f0ad83edfccfd5832e58e8a26c88aa8b72c1cb"
     }
   }
 }

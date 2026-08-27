@@ -21,7 +21,7 @@ Service::Service()
         if (line == "source=official") install_source_ = InstallSource::official;
         if (line == "source=mirror") install_source_ = InstallSource::mirror;
     }
-    log_.info("Launcher service initialized; version=0.1.1-beta.1; state=" + state_directory_.string());
+    log_.info("Launcher service initialized; version=0.1.1-beta.2; state=" + state_directory_.string());
 }
 
 Status Service::detect() {
