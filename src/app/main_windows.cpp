@@ -1,5 +1,9 @@
 #ifdef _WIN32
 
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0A00  // Windows 10: SetProcessDpiAwarenessContext etc.
+#endif
+
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <commctrl.h>

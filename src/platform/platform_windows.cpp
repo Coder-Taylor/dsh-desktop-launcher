@@ -1,5 +1,9 @@
 #ifdef _WIN32
 
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0A00  // Windows 10 APIs (GetCurrentPackageFullName etc.)
+#endif
+
 #include "platform/platform.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -418,14 +422,11 @@ std::filesystem::path dsh_home_directory() {
             if (!configured.empty()) return configured;
         }
     }
-    wchar_t* profile = nullptr;
-    std::size_t length{};
-    if (_wdupenv_s(&profile, &length, L"USERPROFILE") == 0 && profile) {
-        const std::filesystem::path result = std::filesystem::path(profile) / L".dsh";
-        free(profile);
-        return result;
+    wchar_t profile[32768];
+    const DWORD size = GetEnvironmentVariableW(L"USERPROFILE", profile, static_cast<DWORD>(std::size(profile)));
+    if (size > 0 && size < std::size(profile)) {
+        return std::filesystem::path(profile) / L".dsh";
     }
-    if (profile) free(profile);
     return {};
 }
 
@@ -841,14 +842,11 @@ if (!target || !output) fail('missing arguments'); else fetchUrl(target, 0);
 }  // namespace
 
 std::filesystem::path state_directory() {
-    wchar_t* value = nullptr;
-    std::size_t length{};
-    if (_wdupenv_s(&value, &length, L"LOCALAPPDATA") == 0 && value) {
-        const std::filesystem::path result = std::filesystem::path(value) / "DshLauncher";
-        free(value);
-        return result;
+    wchar_t value[32768];
+    const DWORD size = GetEnvironmentVariableW(L"LOCALAPPDATA", value, static_cast<DWORD>(std::size(value)));
+    if (size > 0 && size < std::size(value)) {
+        return std::filesystem::path(value) / "DshLauncher";
     }
-    if (value) free(value);
     return std::filesystem::temp_directory_path() / "DshLauncher";
 }
 
