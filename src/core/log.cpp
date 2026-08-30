@@ -5,6 +5,9 @@
 #include <iomanip>
 #include <sstream>
 #ifdef _WIN32
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0A00
+#endif
 #include <windows.h>
 #else
 #include <unistd.h>
@@ -14,6 +17,11 @@ namespace dsh {
 namespace {
 constexpr std::uintmax_t max_log_size = 512 * 1024;
 constexpr int log_copies = 3;
+
+std::string path_utf8(const std::filesystem::path& path) {
+    const auto value = path.u8string();
+    return {reinterpret_cast<const char*>(value.data()), value.size()};
+}
 
 std::string process_suffix() {
 #ifdef _WIN32
@@ -35,12 +43,19 @@ Log::Log(const std::filesystem::path& state_directory)
                      ("launcher-" + process_suffix() + ".log");
     std::filesystem::create_directories(fallback_path_.parent_path(), error);
     cleanup_old_logs();
+    // Record the exact paths used by this process so a session whose primary
+    // log cannot be appended is still discoverable in the UI ("打开日志目录").
+    write("INFO", "log primary=" + path_utf8(path_) + "; session=" + path_utf8(fallback_path_));
 }
 
 void Log::info(const std::string& message) { write("INFO", message); }
 void Log::error(const std::string& message) { write("ERROR", message); }
 const std::filesystem::path& Log::path() const noexcept { return path_; }
 const std::filesystem::path& Log::fallback_path() const noexcept { return fallback_path_; }
+std::filesystem::path Log::used_path() const {
+    std::lock_guard lock(mutex_);
+    return primary_usable_ ? path_ : fallback_path_;
+}
 
 void Log::write(const char* level, const std::string& original_message) {
     std::lock_guard lock(mutex_);
@@ -70,7 +85,13 @@ void Log::write(const char* level, const std::string& original_message) {
     };
     // A locked or redirected %LOCALAPPDATA% must not make diagnostics disappear.
     // Keep a second copy under %TEMP% so startup/update failures remain inspectable.
-    if (!append(path_)) append(fallback_path_);
+    if (primary_usable_) {
+        if (append(path_)) return;
+        primary_usable_ = false;
+    }
+    // Once the primary file fails, keep the whole remainder of this process
+    // in one session log. The UI can then open a stable, truthful location.
+    append(fallback_path_);
 }
 
 void Log::rotate_if_needed() {

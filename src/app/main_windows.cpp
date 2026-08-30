@@ -1,5 +1,9 @@
 #ifdef _WIN32
 
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0A00  // Windows 10: SetProcessDpiAwarenessContext etc.
+#endif
+
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <commctrl.h>
@@ -674,9 +678,10 @@ private:
         settings_content_detail_ = add_label(L"更多设置将在后续版本提供。", 230, 152, 286, 58, normal_font_);
         settings_tray_button_ = add_button(L"", id_settings_tray, 230, 230, 286, 44);
         settings_close_button_ = add_button(L"", id_settings_close, 230, 286, 286, 44);
-        settings_info_list_ = CreateWindowExW(0, L"LISTBOX", L"", WS_CHILD | WS_VSCROLL | LBS_NOINTEGRALHEIGHT,
+        settings_info_list_ = CreateWindowExW(0, L"LISTBOX", L"", WS_CHILD | WS_VSCROLL | WS_HSCROLL | LBS_NOINTEGRALHEIGHT,
                                                scale(230), scale(220), scale(286), scale(76), hwnd_, nullptr, instance_, nullptr);
         SendMessageW(settings_info_list_, WM_SETFONT, reinterpret_cast<WPARAM>(small_font_), TRUE);
+        SendMessageW(settings_info_list_, LB_SETHORIZONTALEXTENT, scale(900), 0);
         settings_hint_ = add_label(L"", 230, 404, 286, 22, small_font_);
         open_logs_button_ = add_button(L"打开日志目录", id_open_logs, 230, 230, 220, 38);
         uninstall_dsh_button_ = add_button(L"卸载 DSH", id_uninstall_dsh, 230, 308, 286, 38);
@@ -1916,7 +1921,20 @@ private:
             ShowWindow(settings_hint_, SW_SHOW);
         } else if (section == SettingsSection::logs) {
             set_text(settings_content_title_, L"日志与诊断");
-            set_text(settings_content_detail_, L"首页显示近期运行记录。\n完整日志保存在本机应用数据目录。");
+            set_text(settings_content_detail_, L"完整日志保存在本机应用数据目录。\n主日志不可写入时使用会话日志（带进程号）。");
+            SendMessageW(settings_info_list_, LB_RESETCONTENT, 0, 0);
+            const auto add_info = [this](const std::wstring& row) {
+                const auto padded = L"  " + row;
+                SendMessageW(settings_info_list_, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(padded.c_str()));
+            };
+            add_info(L"启动器日志：" + service_.log_path().wstring());
+            add_info(L"会话日志：" + service_.fallback_log_path().wstring());
+            add_info(L"DSH 服务日志：" + service_.service_log_path().wstring());
+            ShowWindow(settings_info_list_, SW_SHOW);
+            // The info list occupies y 220-296; place the button below it so
+            // the two controls never overlap.
+            SetWindowPos(open_logs_button_, nullptr, scale(230), scale(308), scale(220), scale(38),
+                         SWP_NOZORDER | SWP_NOACTIVATE);
             ShowWindow(open_logs_button_, SW_SHOW);
         } else if (section == SettingsSection::maintenance) {
             set_text(settings_content_title_, L"安装与管理");
@@ -2149,7 +2167,10 @@ private:
     }
 
     void open_logs() {
-        const auto directory = service_.log_path().parent_path();
+        // Open the directory that actually holds this process's log: the
+        // session log under %TEMP% when the primary %LOCALAPPDATA% log could
+        // not be appended (e.g. redirected or locked profile).
+        const auto directory = service_.used_log_path().parent_path();
         const auto result = reinterpret_cast<std::intptr_t>(
             ShellExecuteW(hwnd_, L"open", directory.c_str(), nullptr, nullptr, SW_SHOWNORMAL));
         if (result <= 32) show_error("无法打开日志目录。");

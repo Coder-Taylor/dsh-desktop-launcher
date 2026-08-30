@@ -37,7 +37,9 @@ try {
 
 $flags = @('-std=c++20', '-Wall', '-Wextra', '-Wpedantic', '-mwindows', "-I$projectRoot\src")
 if ($Configuration -eq 'Release') {
-    $flags += @('-O2', '-DNDEBUG', '-s', '-static-libgcc', '-static-libstdc++')
+    # -static links the C++ runtime and winpthread statically so the EXE runs
+    # on machines without the MinGW runtime DLLs installed.
+    $flags += @('-O2', '-DNDEBUG', '-s', '-static', '-static-libgcc', '-static-libstdc++')
 } else {
     $flags += @('-O0', '-g')
 }

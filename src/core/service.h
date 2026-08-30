@@ -86,6 +86,8 @@ public:
     std::string npm_version();
     [[nodiscard]] const std::filesystem::path& log_path() const noexcept;
     [[nodiscard]] const std::filesystem::path& fallback_log_path() const noexcept;
+    // The log file this process actually appends to (primary or session log).
+    [[nodiscard]] std::filesystem::path used_log_path() const;
     [[nodiscard]] std::filesystem::path service_log_path() const;
 
 private:
