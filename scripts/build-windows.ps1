@@ -5,13 +5,21 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$compiler = 'C:\Develop\MinGW64\bin\g++.exe'
-$resourceCompiler = 'C:\Develop\MinGW64\bin\windres.exe'
+$systemToolchain = 'C:\Develop\MinGW64'
+$fallbackToolchain = Join-Path $projectRoot 'build\toolchain\mingw64'
+$toolchain = if ($env:DSH_LAUNCHER_TOOLCHAIN) { $env:DSH_LAUNCHER_TOOLCHAIN } else { $systemToolchain }
+if (-not $env:DSH_LAUNCHER_TOOLCHAIN -and
+    (-not (Test-Path -LiteralPath (Join-Path $systemToolchain 'bin\g++.exe')) -or
+    -not (Test-Path -LiteralPath (Join-Path $systemToolchain 'x86_64-w64-mingw32\include\windows.h')))) {
+    $toolchain = $fallbackToolchain
+}
+$compiler = Join-Path $toolchain 'bin\g++.exe'
+$resourceCompiler = Join-Path $toolchain 'bin\windres.exe'
 $outputDirectory = Join-Path $projectRoot 'build\windows-release'
 $output = Join-Path $outputDirectory 'dsh-launcher.exe'
 
-if (-not (Test-Path -LiteralPath $compiler)) {
-    throw "C++ compiler not found: $compiler"
+if (-not (Test-Path -LiteralPath $compiler) -or -not (Test-Path -LiteralPath $resourceCompiler)) {
+    throw "Windows compiler toolchain is incomplete: $toolchain"
 }
 
 New-Item -ItemType Directory -Path $outputDirectory -Force | Out-Null
