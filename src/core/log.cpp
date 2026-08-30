@@ -38,12 +38,18 @@ Log::Log(const std::filesystem::path& state_directory)
                      ("launcher-" + process_suffix() + ".log");
     std::filesystem::create_directories(fallback_path_.parent_path(), error);
     cleanup_old_logs();
+    // Record the exact paths used by this process so a session whose primary
+    // log cannot be appended is still discoverable in the UI ("打开日志目录").
+    write("INFO", "log primary=" + path_.string() + "; session=" + fallback_path_.string());
 }
 
 void Log::info(const std::string& message) { write("INFO", message); }
 void Log::error(const std::string& message) { write("ERROR", message); }
 const std::filesystem::path& Log::path() const noexcept { return path_; }
 const std::filesystem::path& Log::fallback_path() const noexcept { return fallback_path_; }
+const std::filesystem::path& Log::used_path() const noexcept {
+    return primary_usable_ ? path_ : fallback_path_;
+}
 
 void Log::write(const char* level, const std::string& original_message) {
     std::lock_guard lock(mutex_);
@@ -73,7 +79,10 @@ void Log::write(const char* level, const std::string& original_message) {
     };
     // A locked or redirected %LOCALAPPDATA% must not make diagnostics disappear.
     // Keep a second copy under %TEMP% so startup/update failures remain inspectable.
-    if (!append(path_)) append(fallback_path_);
+    if (!append(path_)) {
+        primary_usable_ = false;
+        append(fallback_path_);
+    }
 }
 
 void Log::rotate_if_needed() {

@@ -422,6 +422,7 @@ std::string Service::node_version() { return platform::node_version(); }
 std::string Service::npm_version() { return platform::npm_version(); }
 const std::filesystem::path& Service::log_path() const noexcept { return log_.path(); }
 const std::filesystem::path& Service::fallback_log_path() const noexcept { return log_.fallback_path(); }
+const std::filesystem::path& Service::used_log_path() const noexcept { return log_.used_path(); }
 std::filesystem::path Service::service_log_path() const { return state_directory_ / "logs" / "dsh-web.log"; }
 
 std::optional<std::uint32_t> Service::read_pid() const {
