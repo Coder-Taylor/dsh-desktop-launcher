@@ -8,6 +8,12 @@
 GitHub 保留为代码主线与 Release 备用源；**Gitee 是发布主仓库和默认 Release 下载源**。发布时先保证
 Gitee 的产物完整可用，再同步相同产物到 GitHub；两个仓库不同时独立修改，避免代码分叉。
 
+## 授权与发布页说明
+
+Launcher 自有代码按 [MIT License](../LICENSE) 发布。每个 Release 页面都应写明“DSH Launcher 是非官方工具，与 DeepSeek/DeepSeek Harness 不存在官方隶属或背书关系”，并链接[授权说明](LICENSING.md)。MIT 不覆盖 `@deepseek-ai/dsh`、其依赖或 DeepSeek/DSH 名称和商标。
+
+发布前确认源码中存在 `LICENSE`；安装包也应包含 `LICENSE` 或在发布说明中提供清晰链接。不得把 API Key、Token、Cookie、DSH_HOME、日志或任何用户数据加入 Release 资产。
+
 ## 版本号
 
 启动器使用语义化版本：
@@ -33,7 +39,7 @@ SHA256SUMS.txt
 
 1. 创建版本 Tag；
 2. 自动构建全部目标；
-3. 运行单元测试和启动冒烟测试；
+3. 运行单元测试和启动冒烟测试，并完成第三方组件与许可证检查；
 4. 生成 SHA-256 与更新清单；
 5. 创建并核对 Gitee Release 草稿；
 6. 同步完全相同的产物到 GitHub Release 草稿；

@@ -209,6 +209,7 @@ An unofficial cross-platform desktop launcher for DeepSeek Harness with one-clic
 
 - GitHub 作为代码开发主仓库；
 - Gitee 作为代码镜像和国内首选 Release 下载源；
+- Launcher 自有代码使用 MIT License；DSH、其依赖和相关名称仍遵循各自上游许可，项目不宣称官方关系；
 - 开发只在主仓库合并，自动同步到镜像，避免双向提交冲突；
 - Tag 使用 `v主版本.次版本.修订版本`；
 - `main` 只放可构建代码，正式文件通过 Release 发布；
@@ -287,7 +288,7 @@ An unofficial cross-platform desktop launcher for DeepSeek Harness with one-clic
 
 1. GitHub 主仓库：`https://github.com/Coder-Taylor/dsh-desktop-launcher`；
 2. Gitee 镜像仓库：`https://gitee.com/taylorchengitee/dsh-desktop-launcher`；
-3. 确定许可证；
+3. 已确定并加入 MIT License；发布页和安装包需持续保留授权与非官方说明；
 4. 使用 C++20 创建 Win32/GTK 原生 GUI 工程；
 5. 将原 BAT 的行为拆成测试清单；
 6. 先交付 Windows GUI MVP，再接 Linux 系统适配；

@@ -1,6 +1,6 @@
 # DSH Launcher 测试状态
 
-更新时间：2026-08-27
+更新时间：2026-08-30
 
 本文档区分“代码已验证”和“真实联网/用户环境尚未验证”，不能把编译通过当成更新成功。
 
@@ -9,6 +9,7 @@
 | 项目 | 结果 | 证据 |
 |---|---|---|
 | Windows Release 构建 | 通过 | `scripts/build-windows.ps1` 成功生成 `build/windows-release/dsh-launcher.exe` |
+| MIT 授权与第三方边界 | 通过 | 仓库包含 `LICENSE` 与 `docs/LICENSING.md`；明确 MIT 仅覆盖 Launcher 自有内容 |
 | Linux 源码语法检查 | 通过 | `g++ -std=c++20 -Isrc -fsyntax-only ...` |
 | 工作区差异检查 | 通过 | `git diff --check` |
 | 启动器内存基线 | 通过 | 运行实例约 43–45 MB，未出现 29 GB 占用 |

@@ -32,6 +32,14 @@ GUI (src/app, Windows Win32 / Linux GTK)
 - 更新使用“下载到新目录后切换”，不在原目录边下载边覆盖。
 - Windows 与 Linux 的差异集中在接口实现，不复制业务逻辑。
 
+## 授权与第三方边界
+
+- Launcher 自有代码按 [MIT License](../LICENSE) 发布；
+- `@deepseek-ai/dsh` 及其依赖在运行时由 npm 安装或复用，仍按各自上游许可证和条款使用；
+- 不将 API Key、账号凭据、DSH_HOME、会话数据或用户已安装的 DSH 文件打进源码或 Release；
+- “DeepSeek”“DeepSeek Harness”“DSH”仅用于说明兼容对象，项目不宣称官方关系或商标授权；
+- 新增第三方二进制、图标、字体和库时，必须在 Release 前记录来源及许可。详见[授权说明](LICENSING.md)。
+
 ## 关键状态机
 
 DSH 状态：

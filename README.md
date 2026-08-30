@@ -20,6 +20,10 @@
 
 GitHub 用作代码主线与镜像；**Gitee 是 Release 主仓库和默认下载源**。面向国内用户的安装包先从 Gitee Release 下载，GitHub Release 只作为备用源。发布时先保证 Gitee 资产可用，再同步相同文件和 SHA-256 到 GitHub，最后才发布更新清单。
 
+## 开源授权与第三方边界
+
+本仓库中由本项目维护的代码、脚本和文档以 [MIT License](LICENSE) 发布。DSH Launcher 是非官方工具，不隶属于、也不代表 DeepSeek 或 DeepSeek Harness；MIT 仅授权本项目内容，**不**授权 `@deepseek-ai/dsh`、其依赖、DeepSeek/DSH 名称或商标，也不改变它们各自的许可与条款。安装或分发 DSH 前请自行阅读上游许可。完整说明见[授权、第三方组件与名称说明](docs/LICENSING.md)。
+
 ## 使用方式
 
 ### 已安装 DSH
@@ -81,6 +85,7 @@ DSH 0.1.1 的依赖较多，npm 首次更新需要解析完整依赖树、下载
 - [完整实施计划](docs/PROJECT_PLAN.md)
 - [技术架构](docs/ARCHITECTURE.md)
 - [发布与更新约定](docs/RELEASES.md)
+- [授权、第三方组件与名称说明](docs/LICENSING.md)
 
 ## 计划中的目录
 
