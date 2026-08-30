@@ -59,7 +59,12 @@ std::optional<std::string> find_dsh() {
     const auto path = capture("command -v dsh 2>/dev/null");
     return path.empty() ? std::nullopt : std::optional<std::string>(path);
 }
+std::optional<std::filesystem::path> remembered_dsh_directory() { return std::nullopt; }
 std::string dsh_version(const std::string& executable) { return capture("\"" + executable + "\" --version 2>/dev/null"); }
+std::optional<std::string> verified_dsh_version(const std::string& executable) {
+    const auto version = dsh_version(executable);
+    return version.empty() ? std::nullopt : std::optional<std::string>(version);
+}
 std::optional<std::string> latest_dsh_version(bool official_source, const std::atomic_bool*,
                                               std::string* diagnostic) {
     const auto query = [diagnostic](const std::string& registry) {

@@ -20,8 +20,13 @@ Service::Service()
     while (std::getline(settings, line)) {
         if (line == "source=official") install_source_ = InstallSource::official;
         if (line == "source=mirror") install_source_ = InstallSource::mirror;
+        if (line == "minimize_to_tray=true") minimize_to_tray_ = true;
+        if (line == "minimize_to_tray=false") minimize_to_tray_ = false;
+        if (line == "close_action=ask") close_action_ = CloseAction::ask;
+        if (line == "close_action=tray") close_action_ = CloseAction::tray;
+        if (line == "close_action=exit") close_action_ = CloseAction::exit;
     }
-    log_.info("Launcher service initialized; version=0.1.1-beta.2; state=" + state_directory_.string());
+    log_.info("Launcher service initialized; version=0.1.1-beta.10; state=" + state_directory_.string());
 }
 
 Status Service::detect() {
@@ -29,9 +34,19 @@ Status Service::detect() {
     status.running = platform::is_web_running();
     status.pid = read_pid();
     if (const auto executable = platform::find_dsh()) {
-        status.installed = true;
         status.executable = *executable;
-        status.version = platform::dsh_version(*executable);
+        if (const auto version = platform::verified_dsh_version(*executable)) {
+            status.installed = true;
+            status.version = *version;
+        } else {
+            status.installation_incomplete = true;
+        }
+    }
+    if (!status.installed && !status.installation_incomplete) {
+        if (const auto remembered = platform::remembered_dsh_directory();
+            remembered && std::filesystem::exists(*remembered)) {
+            status.installation_incomplete = true;
+        }
     }
     return status;
 }
@@ -42,13 +57,15 @@ bool Service::start(std::string& error) {
     if (platform::is_web_running()) {
         return true;
     }
-    const auto executable = platform::find_dsh();
-    if (!executable) {
-        error = "未检测到 dsh，请先安装 DeepSeek Harness。";
+    const auto current = detect();
+    if (!current.installed || current.executable.empty()) {
+        error = current.installation_incomplete
+                    ? "检测到 DSH 安装不完整，请使用“修复 DSH”在原安装目录重新安装。"
+                    : "未检测到 dsh，请先安装 DeepSeek Harness。";
         return false;
     }
     const auto service_log = state_directory_ / "logs" / "dsh-web.log";
-    const auto pid = platform::start_dsh(*executable, service_log, error);
+    const auto pid = platform::start_dsh(current.executable, service_log, error);
     if (!pid) {
         log_.error("Failed to start DSH: " + error);
         return false;
@@ -94,7 +111,13 @@ bool Service::stop(std::string& error) {
     return true;
 }
 
-bool Service::open_web(std::string& error) { return platform::open_web(error); }
+bool Service::open_web(std::string& error) {
+    if (!platform::is_web_running()) {
+        error = "DSH Web 服务没有通过 HTTP 健康检查，未打开浏览器；请先启动或修复 DSH。";
+        return false;
+    }
+    return platform::open_web(error);
+}
 
 bool Service::ensure_installed(const Progress& progress, std::string& error) {
     return install_at(default_dsh_directory(), install_source_, progress, error);
@@ -221,6 +244,7 @@ bool Service::update(const Progress& progress, std::string& error,
     if (prefix.filename() == ".bin" && prefix.parent_path().filename() == "node_modules") {
         prefix = prefix.parent_path().parent_path();
     }
+    bool service_stopped_for_update = false;
     if (current.running) {
         report("正在停止当前 DSH 服务");
         if (!stop(error)) return false;
@@ -232,11 +256,26 @@ bool Service::update(const Progress& progress, std::string& error,
             log_.error("DSH update aborted because the service is still listening on port 3080");
             return false;
         }
+        service_stopped_for_update = true;
         report("DSH 服务已停止，开始更新文件");
     }
+    const auto restore_service_after_failure = [&] {
+        if (!service_stopped_for_update) return;
+        report("更新未完成，正在恢复原 DSH 服务");
+        std::string restart_error;
+        if (start(restart_error)) {
+            report("更新未完成，已恢复原 DSH 服务");
+            return;
+        }
+        const auto recovery_error = restart_error.empty() ? std::string("未知错误") : restart_error;
+        log_.error("DSH update recovery failed: " + recovery_error);
+        error += "；另外，未能恢复原 DSH 服务：" + recovery_error;
+        report("更新未完成，恢复原 DSH 服务失败");
+    };
     report("正在原安装目录更新 DSH " + *latest + "（依赖较多，可能需要数分钟）");
     if (!platform::install_dsh_at(prefix, install_source_ == InstallSource::official, error, *latest, cancel, report)) {
         log_.error("DSH update failed: " + error);
+        restore_service_after_failure();
         return false;
     }
     const auto verified = detect();
@@ -245,6 +284,7 @@ bool Service::update(const Progress& progress, std::string& error,
                 (verified.version.empty() ? std::string("未知") : verified.version) +
                 "；检测路径=" + verified.executable;
         log_.error("DSH update verification failed; expected=" + *latest + ", actual=" + verified.version);
+        restore_service_after_failure();
         return false;
     }
     log_.info("DSH updated in place; from=" + current.version + "; to=" + verified.version);
@@ -280,16 +320,65 @@ EnvironmentStatus Service::environment() {
 bool Service::managed_node_installed() const { return platform::has_managed_node(); }
 bool Service::launcher_owned_node_installed() const { return platform::has_launcher_owned_node(); }
 
-std::filesystem::path Service::default_dsh_directory() const { return platform::default_dsh_directory(); }
+std::filesystem::path Service::default_dsh_directory() const {
+    // A previous pre-transaction launcher could be interrupted after npm had
+    // removed its shim. Keep using its recorded prefix so the normal install
+    // flow repairs that installation instead of silently creating a second one.
+    if (const auto remembered = platform::remembered_dsh_directory()) return *remembered;
+    return platform::default_dsh_directory();
+}
 InstallSource Service::install_source() const noexcept { return install_source_; }
 
 bool Service::set_install_source(InstallSource source, std::string& error) {
+    const auto previous = install_source_;
+    install_source_ = source;
+    if (!write_settings(error)) {
+        install_source_ = previous;
+        return false;
+    }
+    log_.info(source == InstallSource::official ? "Install source changed to official"
+                                                : "Install source changed to mirror");
+    return true;
+}
+
+bool Service::minimize_to_tray() const noexcept { return minimize_to_tray_; }
+
+bool Service::set_minimize_to_tray(bool enabled, std::string& error) {
+    const bool previous = minimize_to_tray_;
+    minimize_to_tray_ = enabled;
+    if (!write_settings(error)) {
+        minimize_to_tray_ = previous;
+        return false;
+    }
+    log_.info(enabled ? "Automatic tray minimize enabled" : "Automatic tray minimize disabled");
+    return true;
+}
+
+CloseAction Service::close_action() const noexcept { return close_action_; }
+
+bool Service::set_close_action(CloseAction action, std::string& error) {
+    const auto previous = close_action_;
+    close_action_ = action;
+    if (!write_settings(error)) {
+        close_action_ = previous;
+        return false;
+    }
+    const char* name = action == CloseAction::tray ? "tray" : action == CloseAction::exit ? "exit" : "ask";
+    log_.info(std::string("Title-bar close action changed to ") + name);
+    return true;
+}
+
+bool Service::write_settings(std::string& error) const {
     const auto temporary = std::filesystem::path(settings_file_.wstring() + L".tmp");
     {
         std::ofstream stream(temporary, std::ios::trunc);
-        stream << (source == InstallSource::official ? "source=official\n" : "source=mirror\n");
+        stream << (install_source_ == InstallSource::official ? "source=official\n" : "source=mirror\n");
+        stream << (minimize_to_tray_ ? "minimize_to_tray=true\n" : "minimize_to_tray=false\n");
+        stream << (close_action_ == CloseAction::tray ? "close_action=tray\n"
+                    : close_action_ == CloseAction::exit ? "close_action=exit\n"
+                                                        : "close_action=ask\n");
         if (!stream.good()) {
-            error = "无法保存更新源设置。";
+            error = "无法保存启动器设置。";
             return false;
         }
     }
@@ -298,13 +387,10 @@ bool Service::set_install_source(InstallSource source, std::string& error) {
     filesystem_error.clear();
     std::filesystem::rename(temporary, settings_file_, filesystem_error);
     if (filesystem_error) {
-        error = "无法保存更新源设置。";
+        error = "无法保存启动器设置。";
         std::filesystem::remove(temporary, filesystem_error);
         return false;
     }
-    install_source_ = source;
-    log_.info(source == InstallSource::official ? "Install source changed to official"
-                                                : "Install source changed to mirror");
     return true;
 }
 

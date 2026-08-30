@@ -19,7 +19,13 @@ struct LauncherUpdate {
 
 std::filesystem::path state_directory();
 std::optional<std::string> find_dsh();
+// Returns the prefix saved by the launcher even if a cancelled older launcher
+// left its dsh shim missing.  Callers use it only as a repair destination.
+std::optional<std::filesystem::path> remembered_dsh_directory();
 std::string dsh_version(const std::string& executable);
+// Returns a version only after checking both the launch shim and the DSH core
+// package.  An interrupted install is deliberately reported as incomplete.
+std::optional<std::string> verified_dsh_version(const std::string& executable);
 std::optional<std::string> latest_dsh_version(bool official_source = false,
                                               const std::atomic_bool* cancel = nullptr,
                                               std::string* diagnostic = nullptr);

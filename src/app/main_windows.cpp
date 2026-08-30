@@ -24,10 +24,11 @@ namespace {
 
 constexpr wchar_t window_class_name[] = L"DshLauncherWindow";
 constexpr wchar_t choice_dialog_class_name[] = L"DshLauncherChoiceDialog";
-constexpr wchar_t launcher_version[] = L"0.1.1-beta.2";
+constexpr wchar_t launcher_version[] = L"0.1.1-beta.10";
 constexpr int id_app_icon = 101;
 constexpr UINT message_task = WM_APP + 1;
 constexpr UINT message_choice_result = WM_APP + 2;
+constexpr UINT message_tray = WM_APP + 3;
 constexpr int id_primary = 101;
 constexpr int id_stop = 102;
 constexpr int id_details = 103;
@@ -55,6 +56,12 @@ constexpr int id_settings_about = 124;
 constexpr int id_source_menu = 125;
 constexpr int id_source_mirror = 126;
 constexpr int id_source_official = 127;
+constexpr int id_settings_tray = 128;
+constexpr int id_settings_close = 129;
+constexpr UINT id_tray_restore = 301;
+constexpr UINT id_tray_open_web = 302;
+constexpr UINT id_tray_stop = 303;
+constexpr UINT id_tray_exit = 304;
 constexpr UINT_PTR id_auto_close = 201;
 constexpr UINT_PTR id_elapsed = 202;
 constexpr UINT_PTR id_progress = 203;
@@ -104,9 +111,12 @@ public:
     static bool show(HINSTANCE instance, HWND owner, UINT dpi, const std::wstring& title,
                      const std::wstring& detail, const std::wstring& primary,
                      const std::wstring& secondary, bool destructive,
-                     bool show_memory_option = false) {
+                     bool show_memory_option = false,
+                     std::wstring memory_label = L"保留对话记忆（推荐）",
+                     std::wstring tertiary = {}, bool memory_checked = true) {
         auto* dialog = new ChoiceDialog(instance, owner, dpi, title, detail, primary, secondary,
-                                        destructive, show_memory_option);
+                                        destructive, show_memory_option, std::move(memory_label),
+                                        std::move(tertiary), memory_checked);
         if (!dialog->create()) {
             delete dialog;
             return false;
@@ -119,11 +129,14 @@ public:
 
 private:
     ChoiceDialog(HINSTANCE instance, HWND owner, UINT dpi, std::wstring title,
-                 std::wstring detail, std::wstring primary, std::wstring secondary,
-                 bool destructive, bool show_memory_option)
+                  std::wstring detail, std::wstring primary, std::wstring secondary,
+                  bool destructive, bool show_memory_option, std::wstring memory_label,
+                  std::wstring tertiary, bool memory_checked)
         : instance_(instance), owner_(owner), dpi_(dpi), title_(std::move(title)),
           detail_(std::move(detail)), primary_(std::move(primary)), secondary_(std::move(secondary)),
-          destructive_(destructive), show_memory_option_(show_memory_option) {}
+          memory_label_(std::move(memory_label)), tertiary_(std::move(tertiary)),
+          destructive_(destructive), show_memory_option_(show_memory_option),
+          memory_checked_(memory_checked) {}
 
     ~ChoiceDialog() {
         if (title_font_) DeleteObject(title_font_);
@@ -162,26 +175,36 @@ private:
         detail_label_ = CreateWindowExW(0, L"STATIC", detail_.c_str(), WS_CHILD | WS_VISIBLE | SS_CENTER,
                                         scale(28), scale(66), scale(354), scale(show_memory_option_ ? 58 : 52), hwnd_, nullptr, instance_, nullptr);
         if (show_memory_option_) {
-            memory_checkbox_ = CreateWindowExW(0, L"BUTTON", L"保留对话记忆（推荐）",
-                                                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
-                                                 scale(38), scale(132), scale(334), scale(26), hwnd_,
-                                                 reinterpret_cast<HMENU>(3), instance_, nullptr);
-            SendMessageW(memory_checkbox_, BM_SETCHECK, BST_CHECKED, 0);
+            memory_checkbox_ = CreateWindowExW(0, L"BUTTON", memory_label_.c_str(),
+                                                  WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+                                                  scale(38), scale(132), scale(334), scale(26), hwnd_,
+                                                  reinterpret_cast<HMENU>(4), instance_, nullptr);
+            SendMessageW(memory_checkbox_, BM_SETCHECK, memory_checked_ ? BST_CHECKED : BST_UNCHECKED, 0);
         }
         const int buttons_y = show_memory_option_ ? 184 : 148;
+        const bool three_buttons = !tertiary_.empty();
         primary_button_ = CreateWindowExW(0, L"BUTTON", primary_.c_str(),
                                           WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
-                                          scale(38), scale(buttons_y), scale(158), scale(40), hwnd_,
+                                          scale(three_buttons ? 24 : 38), scale(buttons_y),
+                                          scale(three_buttons ? 110 : 158), scale(40), hwnd_,
                                           reinterpret_cast<HMENU>(1), instance_, nullptr);
         secondary_button_ = CreateWindowExW(0, L"BUTTON", secondary_.c_str(),
                                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
-                                            scale(214), scale(buttons_y), scale(158), scale(40), hwnd_,
+                                            scale(three_buttons ? 150 : 214), scale(buttons_y),
+                                            scale(three_buttons ? 110 : 158), scale(40), hwnd_,
                                             reinterpret_cast<HMENU>(2), instance_, nullptr);
+        if (three_buttons) {
+            tertiary_button_ = CreateWindowExW(0, L"BUTTON", tertiary_.c_str(),
+                                               WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+                                               scale(276), scale(buttons_y), scale(110), scale(40), hwnd_,
+                                               reinterpret_cast<HMENU>(3), instance_, nullptr);
+        }
         SendMessageW(title_label_, WM_SETFONT, reinterpret_cast<WPARAM>(title_font_), TRUE);
         SendMessageW(detail_label_, WM_SETFONT, reinterpret_cast<WPARAM>(text_font_), TRUE);
         if (memory_checkbox_) SendMessageW(memory_checkbox_, WM_SETFONT, reinterpret_cast<WPARAM>(text_font_), TRUE);
         SendMessageW(primary_button_, WM_SETFONT, reinterpret_cast<WPARAM>(text_font_), TRUE);
         SendMessageW(secondary_button_, WM_SETFONT, reinterpret_cast<WPARAM>(text_font_), TRUE);
+        if (tertiary_button_) SendMessageW(tertiary_button_, WM_SETFONT, reinterpret_cast<WPARAM>(text_font_), TRUE);
         const DWORD rounded = 2;
         DwmSetWindowAttribute(hwnd_, 33, &rounded, sizeof(rounded));
     }
@@ -213,13 +236,13 @@ private:
         DeleteObject(pen);
     }
 
-    void finish(bool accepted) {
+    void finish(int result) {
         if (finished_) return;
         finished_ = true;
         EnableWindow(owner_, TRUE);
         const bool preserve_memory = !show_memory_option_ ||
             SendMessageW(memory_checkbox_, BM_GETCHECK, 0, 0) == BST_CHECKED;
-        PostMessageW(owner_, message_choice_result, accepted ? 1 : 0, preserve_memory ? 1 : 0);
+        PostMessageW(owner_, message_choice_result, static_cast<WPARAM>(result), preserve_memory ? 1 : 0);
         DestroyWindow(hwnd_);
     }
 
@@ -251,13 +274,14 @@ private:
         }
         case WM_DRAWITEM: self->draw_button(*reinterpret_cast<DRAWITEMSTRUCT*>(lparam)); return TRUE;
         case WM_COMMAND:
-            if (LOWORD(wparam) == 1) self->finish(true);
-            else if (LOWORD(wparam) == 2) self->finish(false);
+            if (LOWORD(wparam) == 1) self->finish(1);
+            else if (LOWORD(wparam) == 2) self->finish(0);
+            else if (LOWORD(wparam) == 3) self->finish(2);
             return 0;
         case WM_KEYDOWN:
-            if (wparam == VK_ESCAPE) self->finish(false);
+            if (wparam == VK_ESCAPE) self->finish(self->tertiary_.empty() ? 0 : 2);
             return 0;
-        case WM_CLOSE: self->finish(false); return 0;
+        case WM_CLOSE: self->finish(self->tertiary_.empty() ? 0 : 2); return 0;
         case WM_NCDESTROY: {
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
             const auto result = DefWindowProcW(hwnd, message, wparam, lparam);
@@ -275,14 +299,18 @@ private:
     HWND detail_label_{};
     HWND primary_button_{};
     HWND secondary_button_{};
+    HWND tertiary_button_{};
     HWND memory_checkbox_{};
     UINT dpi_{96};
     std::wstring title_;
     std::wstring detail_;
     std::wstring primary_;
     std::wstring secondary_;
+    std::wstring memory_label_;
+    std::wstring tertiary_;
     bool destructive_{};
     bool show_memory_option_{};
+    bool memory_checked_{};
     bool finished_{};
     HFONT title_font_{};
     HFONT text_font_{};
@@ -475,7 +503,7 @@ private:
     enum class Page { home, updates, settings };
     enum class SettingsSection { general, logs, maintenance, about };
     enum class UpdateAction { all, dsh, launcher };
-    enum class ChoiceMode { none, update, uninstall };
+    enum class ChoiceMode { none, update, uninstall, close };
     enum class UninstallTarget { none, dsh, node, both };
 
     static LRESULT CALLBACK static_window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
@@ -503,7 +531,14 @@ private:
         case WM_TIMER:
             if (wparam == id_auto_close) {
                 KillTimer(hwnd_, id_auto_close);
-                SendMessageW(hwnd_, WM_CLOSE, 0, 0);
+                if (service_.minimize_to_tray() && last_status_.running) {
+                    append_action(L"已自动最小化到系统托盘");
+                    minimize_to_tray();
+                } else {
+                    // Only an explicit title-bar close asks the user. The
+                    // automatic timeout keeps its existing exit behavior.
+                    DestroyWindow(hwnd_);
+                }
             } else if (wparam == id_elapsed && busy_.load()) {
                 const auto seconds = (GetTickCount64() - operation_started_) / 1000;
                 set_text(footer_label_, L"正在处理 · 已用时 " + std::to_wstring(seconds) + L" 秒");
@@ -538,8 +573,14 @@ private:
             return 0;
         }
         case message_choice_result:
-            handle_choice_result(wparam != 0, lparam != 0);
+            handle_choice_result(static_cast<int>(wparam), lparam != 0);
             return 0;
+        case message_tray: {
+            const UINT event = LOWORD(lparam);
+            if (event == WM_LBUTTONDBLCLK) restore_from_tray();
+            else if (event == WM_CONTEXTMENU || event == WM_RBUTTONUP) show_tray_menu();
+            return 0;
+        }
         case WM_CLOSE:
             if (busy_.load()) {
                 if (!close_busy_notice_shown_) {
@@ -548,14 +589,16 @@ private:
                 }
                 return 0;
             }
-            if (open_web_when_closing_) {
-                open_web_when_closing_ = false;
-                std::string error;
-                if (!service_.open_web(error)) append_action(utf8_to_wide("关闭后打开网页失败：" + error));
-            }
-            DestroyWindow(hwnd_);
+            KillTimer(hwnd_, id_auto_close);
+            if (service_.close_action() == dsh::CloseAction::tray) minimize_to_tray();
+            else if (service_.close_action() == dsh::CloseAction::exit) DestroyWindow(hwnd_);
+            else show_close_popup();
             return 0;
-        case WM_DESTROY: alive_.store(false); PostQuitMessage(0); return 0;
+        case WM_DESTROY:
+            remove_tray_icon();
+            alive_.store(false);
+            PostQuitMessage(0);
+            return 0;
         default: return DefWindowProcW(hwnd_, message, wparam, lparam);
         }
     }
@@ -629,6 +672,8 @@ private:
         settings_nav_about_ = add_button(L"关于", id_settings_about, 38, 250, 140, 38);
         settings_content_title_ = add_label(L"通用", 230, 112, 286, 30, status_font_);
         settings_content_detail_ = add_label(L"更多设置将在后续版本提供。", 230, 152, 286, 58, normal_font_);
+        settings_tray_button_ = add_button(L"", id_settings_tray, 230, 230, 286, 44);
+        settings_close_button_ = add_button(L"", id_settings_close, 230, 286, 286, 44);
         settings_info_list_ = CreateWindowExW(0, L"LISTBOX", L"", WS_CHILD | WS_VSCROLL | LBS_NOINTEGRALHEIGHT,
                                                scale(230), scale(220), scale(286), scale(76), hwnd_, nullptr, instance_, nullptr);
         SendMessageW(settings_info_list_, WM_SETFONT, reinterpret_cast<WPARAM>(small_font_), TRUE);
@@ -644,7 +689,7 @@ private:
         for (auto control : {back_button_, update_info_heading_, update_versions_label_, update_notes_button_,
                              update_notes_list_, source_select_button_, source_menu_button_, source_mirror_button_, source_official_button_, update_action_button_, update_action_menu_button_,
                              update_all_button_, update_dsh_button_, update_launcher_button_, update_cancel_button_,
-                             settings_nav_general_, settings_nav_logs_, settings_nav_maintenance_, settings_nav_about_, settings_content_title_, settings_content_detail_, settings_info_list_, settings_hint_,
+                             settings_nav_general_, settings_nav_logs_, settings_nav_maintenance_, settings_nav_about_, settings_content_title_, settings_content_detail_, settings_tray_button_, settings_close_button_, settings_info_list_, settings_hint_,
                              open_logs_button_, uninstall_dsh_button_, uninstall_node_button_,
                              uninstall_all_button_}) {
             ShowWindow(control, SW_HIDE);
@@ -704,7 +749,8 @@ private:
                 DeleteObject(row_pen);
             };
             if (!busy_.load()) {
-                draw_version_row(132, L"DSH", utf8_to_wide(last_status_.version.empty() ? "未安装" : last_status_.version),
+                draw_version_row(132, L"DSH", utf8_to_wide(last_status_.installation_incomplete ? "安装不完整" :
+                                                              last_status_.version.empty() ? "未安装" : last_status_.version),
                                  dsh_update_available_ ? (L"→ " + utf8_to_wide(latest_version_))
                                                        : dsh_version_checked_ ? L"已是最新" : L"未能检查",
                                  dsh_update_available_);
@@ -869,6 +915,8 @@ private:
             if (id == id_settings_logs) { show_settings_page(SettingsSection::logs); return; }
             if (id == id_settings_maintenance) { show_settings_page(SettingsSection::maintenance); return; }
             if (id == id_settings_about) { show_settings_page(SettingsSection::about); return; }
+            if (id == id_settings_tray && !busy_.load()) { toggle_tray_setting(); return; }
+            if (id == id_settings_close && !busy_.load()) { cycle_close_setting(); return; }
         }
         if (busy_.load() && (id == id_stop || id == id_update_cancel) && cancellable_.load()) {
             request_cancel();
@@ -968,7 +1016,7 @@ private:
                              source_select_button_, source_menu_button_, source_mirror_button_, source_official_button_,
                              update_action_button_, update_action_menu_button_, update_all_button_,
                              update_dsh_button_, update_launcher_button_, update_cancel_button_, settings_nav_general_,
-                             settings_nav_logs_, settings_nav_maintenance_, settings_nav_about_, settings_content_title_, settings_content_detail_, settings_info_list_, settings_hint_,
+                             settings_nav_logs_, settings_nav_maintenance_, settings_nav_about_, settings_content_title_, settings_content_detail_, settings_tray_button_, settings_close_button_, settings_info_list_, settings_hint_,
                              open_logs_button_, uninstall_dsh_button_, uninstall_node_button_, uninstall_all_button_}) {
             ShowWindow(control, SW_HIDE);
         }
@@ -993,9 +1041,13 @@ private:
                 SetWindowPos(check_updates_button_, nullptr, scale(380), scale(390), scale(166), scale(48), SWP_NOZORDER | SWP_NOACTIVATE);
                 ShowWindow(stop_button_, SW_SHOW);
             } else {
-                set_text(status_label_, status.installed ? L"● DSH 已停止" : L"● 尚未安装 DSH");
-                set_text(detail_label_, status.installed ? L"需要时点击启动 DSH" : L"点击启动 DSH 后选择安装位置");
-                set_text(primary_button_, status.installed ? L"启动 DSH" : L"安装 DSH");
+                set_text(status_label_, status.installed ? L"● DSH 已停止" :
+                                            status.installation_incomplete ? L"● DSH 安装不完整" : L"● 尚未安装 DSH");
+                set_text(detail_label_, status.installed ? L"需要时点击启动 DSH" :
+                                            status.installation_incomplete ? L"点击修复 DSH，将在原安装目录安全重装"
+                                                                           : L"点击启动 DSH 后选择安装位置");
+                set_text(primary_button_, status.installed ? L"启动 DSH" :
+                                            status.installation_incomplete ? L"修复 DSH" : L"安装 DSH");
                 SetWindowPos(primary_button_, nullptr, scale(28), scale(390), scale(252), scale(48), SWP_NOZORDER | SWP_NOACTIVATE);
                 SetWindowPos(check_updates_button_, nullptr, scale(294), scale(390), scale(252), scale(48), SWP_NOZORDER | SWP_NOACTIVATE);
                 ShowWindow(stop_button_, SW_HIDE);
@@ -1021,13 +1073,19 @@ private:
         initial_environment_ = environment;
         show_home(status);
         action_mode_ = ActionMode::install_prompt;
-        set_text(status_label_, L"● 检测到尚未安装 DSH");
-        set_text(detail_label_, environment.has_node && environment.has_npm
-                                    ? L"Node.js 已就绪。选择安装方式后即可开始。"
-                                    : L"还需要 Node.js LTS；安装器会先说明来源、目录与授权。 ");
+        const auto repair_directory = service_.default_dsh_directory();
+        const bool can_repair_previous_install = std::filesystem::exists(repair_directory);
+        set_text(status_label_, can_repair_previous_install ? L"● 检测到未完成的 DSH 安装" : L"● 检测到尚未安装 DSH");
+        if (can_repair_previous_install) {
+            set_text(detail_label_, L"将优先在原安装目录重新安装并修复，不会新建第二份 DSH。 ");
+        } else {
+            set_text(detail_label_, environment.has_node && environment.has_npm
+                                        ? L"Node.js 已就绪。选择安装方式后即可开始。"
+                                        : L"还需要 Node.js LTS；安装器会先说明来源、目录与授权。 ");
+        }
         set_text(primary_button_, L"取消");
         set_text(stop_button_, L"开始安装");
-        set_text(check_updates_button_, L"一键安装！");
+        set_text(check_updates_button_, can_repair_previous_install ? L"一键修复" : L"一键安装！");
         SetWindowPos(primary_button_, nullptr, scale(28), scale(390), scale(160), scale(48), SWP_NOZORDER | SWP_NOACTIVATE);
         SetWindowPos(stop_button_, nullptr, scale(202), scale(390), scale(160), scale(48), SWP_NOZORDER | SWP_NOACTIVATE);
         SetWindowPos(check_updates_button_, nullptr, scale(376), scale(390), scale(170), scale(48), SWP_NOZORDER | SWP_NOACTIVATE);
@@ -1035,8 +1093,11 @@ private:
         EnableWindow(primary_button_, TRUE);
         EnableWindow(stop_button_, TRUE);
         EnableWindow(check_updates_button_, TRUE);
-        set_text(footer_label_, L"“一键安装”使用国内镜像、默认目录，并在需要时请求管理员授权 · 懒人必备，一步到位");
-        append_action(L"检测到 DSH 未安装，等待选择安装方式");
+        set_text(footer_label_, can_repair_previous_install
+                                    ? L"“一键修复”会保留原 DSH_HOME、插件、会话与设置，只重建程序文件"
+                                    : L"“一键安装”使用国内镜像、默认目录，并在需要时请求管理员授权 · 懒人必备，一步到位");
+        append_action(can_repair_previous_install ? L"检测到未完成的 DSH 安装，等待修复方式选择"
+                                                   : L"检测到 DSH 未安装，等待选择安装方式");
         InvalidateRect(hwnd_, nullptr, TRUE);
     }
 
@@ -1158,7 +1219,7 @@ private:
         const bool dsh_update = status.installed && latest && !status.version.empty() &&
                                 dsh::version::is_newer(*latest, status.version);
         const bool launcher_update_available = launcher &&
-                                               dsh::version::is_newer(launcher->version, "0.1.1-beta.2");
+                                                dsh::version::is_newer(launcher->version, "0.1.1-beta.10");
         const auto dsh_choice = dsh_update ? latest : std::optional<std::string>{};
         const auto launcher_choice = launcher_update_available ? launcher
                                                                 : std::optional<dsh::platform::LauncherUpdate>{};
@@ -1219,7 +1280,9 @@ private:
             }
             if (automatic && status.running) {
                 append_action(L"服务已在运行，不重复打开网页");
-                set_text(footer_label_, L"DSH 正在后台运行 · 30 秒后关闭窗口");
+                set_text(footer_label_, service_.minimize_to_tray()
+                                               ? L"DSH 正在后台运行 · 30 秒后最小化到系统托盘"
+                                               : L"DSH 正在后台运行 · 30 秒后关闭窗口");
                 SetTimer(hwnd_, id_auto_close, 30000, nullptr);
             }
         });
@@ -1240,10 +1303,14 @@ private:
             show_notice(L"更新检查未完成", L"无法确认全部版本，启动器将保持打开");
             return;
         }
-        append_action(L"没有可用更新，启动器即将自动关闭");
-        set_text(footer_label_, L"DSH 已在后台运行 · 未发现更新，正在关闭启动器");
+        append_action(service_.minimize_to_tray()
+                          ? L"没有可用更新，30 秒后最小化到系统托盘"
+                          : L"没有可用更新，30 秒后自动关闭启动器");
+        set_text(footer_label_, service_.minimize_to_tray()
+                                       ? L"DSH 已在后台运行 · 30 秒后最小化到系统托盘"
+                                       : L"DSH 已在后台运行 · 30 秒后关闭窗口");
         KillTimer(hwnd_, id_auto_close);
-        SetTimer(hwnd_, id_auto_close, 1200, nullptr);
+        SetTimer(hwnd_, id_auto_close, 30000, nullptr);
     }
 
     void start_update_check() {
@@ -1273,14 +1340,29 @@ private:
         }
     }
 
+    void show_close_popup() {
+        if (choice_visible_) return;
+        choice_visible_ = true;
+        choice_mode_ = ChoiceMode::close;
+        if (!ChoiceDialog::show(instance_, hwnd_, dpi_, L"关闭 DSH Launcher？",
+                                L"选择最小化到系统托盘，或完全退出启动器。\nDSH 服务将继续在后台运行。",
+                                L"退出启动器", L"最小化到托盘", true, true,
+                                L"记住我的选择", L"取消", false)) {
+            choice_visible_ = false;
+            choice_mode_ = ChoiceMode::none;
+            show_error("无法显示关闭选择窗口。");
+        }
+    }
+
     void hide_choice_popup() {
         choice_visible_ = false;
         choice_mode_ = ChoiceMode::none;
         InvalidateRect(hwnd_, nullptr, TRUE);
     }
 
-    void handle_choice_result(bool accepted, bool preserve_memory = true) {
+    void handle_choice_result(int result, bool preserve_memory = true) {
         if (!choice_visible_) return;
+        const bool accepted = result == 1;
         const auto mode = choice_mode_;
         const auto return_page = choice_return_page_;
         const auto return_section = choice_return_settings_section_;
@@ -1293,6 +1375,20 @@ private:
                 if (return_page == Page::settings) show_settings_page(return_section);
                 else show_home(last_status_);
             }
+            return;
+        }
+        if (mode == ChoiceMode::close) {
+            if (result == 2) return;
+            const auto action = accepted ? dsh::CloseAction::exit : dsh::CloseAction::tray;
+            if (preserve_memory) {
+                std::string error;
+                if (!service_.set_close_action(action, error)) {
+                    show_error(error);
+                    return;
+                }
+            }
+            if (action == dsh::CloseAction::exit) DestroyWindow(hwnd_);
+            else minimize_to_tray();
             return;
         }
         if (mode == ChoiceMode::uninstall) {
@@ -1322,7 +1418,7 @@ private:
         ShowWindow(back_button_, SW_SHOW);
         for (auto control : {status_label_, detail_label_, progress_, activity_heading_, action_list_, footer_label_,
                              primary_button_, stop_button_, check_updates_button_, settings_nav_general_, settings_nav_logs_,
-                             settings_nav_maintenance_, settings_nav_about_, settings_content_title_, settings_content_detail_, settings_info_list_, settings_hint_, open_logs_button_,
+                             settings_nav_maintenance_, settings_nav_about_, settings_content_title_, settings_content_detail_, settings_tray_button_, settings_close_button_, settings_info_list_, settings_hint_, open_logs_button_,
                              uninstall_dsh_button_, uninstall_node_button_, uninstall_all_button_}) {
             ShowWindow(control, SW_HIDE);
         }
@@ -1515,8 +1611,15 @@ private:
         status_color_ = success_color;
         set_text(status_label_, L"● DSH 已准备好");
         set_text(detail_label_, detail);
-        set_text(footer_label_, utf8_to_wide("DSH " + status.version + " · 30 秒后关闭窗口，服务继续在后台运行"));
-        SetTimer(hwnd_, id_auto_close, 30000, nullptr);
+        if (initial_launch_) {
+            set_text(footer_label_, utf8_to_wide("DSH " + status.version) + L" · 正在后台检查更新");
+        } else {
+            set_text(footer_label_, utf8_to_wide("DSH " + status.version) +
+                                        (service_.minimize_to_tray()
+                                             ? L" · 30 秒后最小化到系统托盘"
+                                             : L" · 30 秒后关闭窗口，服务继续在后台运行"));
+            SetTimer(hwnd_, id_auto_close, 30000, nullptr);
+        }
         InvalidateRect(hwnd_, nullptr, TRUE);
     }
 
@@ -1603,15 +1706,14 @@ private:
         start_service_direct();
     }
 
-    void start_service_direct(bool initial_launch = false, bool open_browser = true,
-                              bool open_on_close = false) {
+    void start_service_direct(bool initial_launch = false) {
         append_action(L"开始启动 DSH Web 服务");
         set_busy(L"正在启动 DSH…", L"启动操作不会再次检查更新");
-        background([this, initial_launch, open_browser, open_on_close] {
+        background([this, initial_launch] {
             std::string error;
             const bool was_already_running = service_.is_running();
             if (!service_.start(error)) {
-                if (error.find("未检测到 dsh") != std::string::npos) {
+                if (error.find("未检测到 dsh") != std::string::npos || error.find("安装不完整") != std::string::npos) {
                     const auto status = service_.detect();
                     const auto environment = service_.environment();
                     post([this, status, environment, initial_launch] {
@@ -1626,22 +1728,14 @@ private:
                 }
                 return;
             }
-            // The original BAT deliberately gives DSH five seconds to create
-            // its web process, then explicitly executes `start` for the local
-            // URL.  Do the same here.  Waiting for a TCP health probe first is
-            // not equivalent on Windows 10: a page may never be requested if
-            // that probe is delayed by a local filter.
-            std::string browser_error;
-            bool browser_opened = false;
-            if (open_browser) {
-                if (!was_already_running) {
-                    for (int tick = 0; tick < 20 && alive_.load(); ++tick) Sleep(250);
-                }
-                if (alive_.load()) browser_opened = service_.open_web(browser_error);
-            }
             dsh::Status current;
             for (int index = 0; index < 120 && alive_.load(); ++index) {
                 if (service_.is_running()) {
+                    // A listener alone can be a process that is about to
+                    // exit. Require a second HTTP response before promising
+                    // that the browser can connect.
+                    Sleep(500);
+                    if (!service_.is_running()) continue;
                     // Obtaining DSH's version starts a separate CLI process.
                     // Do that once after the health probe succeeds, not on
                     // every polling tick.
@@ -1657,17 +1751,11 @@ private:
                 });
                 return;
             }
-            post([this, current, was_already_running, browser_opened, browser_error, initial_launch, open_browser, open_on_close] {
-                append_action(browser_opened ? L"已按 BAT 逻辑请求打开网页"
-                                              : open_on_close ? L"安装完成，等待关闭启动器后打开网页"
-                                                              : L"启动完成，等待手动打开网页");
-                show_ready(current, browser_opened ? L"服务已启动，网页已打开"
-                                                    : open_on_close ? L"安装完成，关闭启动器后自动打开网页"
-                                                                    : L"服务已启动，请点击按钮打开网页");
-                open_web_when_closing_ = open_on_close && !browser_opened;
-                if (open_browser && !browser_opened) {
-                    append_action(utf8_to_wide("网页打开失败：" + browser_error));
-                }
+            post([this, current, was_already_running, initial_launch] {
+                append_action(was_already_running ? L"服务已在运行，未重复打开网页"
+                                                  : L"DSH 已启动，并由 DSH 自身请求打开网页");
+                show_ready(current, was_already_running ? L"服务已在运行，未重复打开网页"
+                                                        : L"服务已启动，DSH 已请求打开网页");
                 if (initial_launch) {
                     initial_service_ready_ = true;
                     finish_initial_launch();
@@ -1706,8 +1794,8 @@ private:
                 const auto version = verified.version.empty() ? L"已完成版本校验" :
                     utf8_to_wide("已安装 " + verified.version + "，版本校验通过");
                 append_action(L"DSH 安装完成：" + version);
-                show_notice(L"DSH 安装完成", (version + L"。关闭启动器后将自动打开 DSH 网页。").c_str());
-                start_service_direct(false, false, true);
+                show_notice(L"DSH 安装完成", (version + L"。现在将启动 DSH Web 服务。").c_str());
+                start_service_direct();
             });
         });
     }
@@ -1807,6 +1895,8 @@ private:
         }
         ShowWindow(settings_info_list_, SW_HIDE);
         ShowWindow(settings_hint_, SW_HIDE);
+        ShowWindow(settings_tray_button_, SW_HIDE);
+        ShowWindow(settings_close_button_, SW_HIDE);
         ShowWindow(open_logs_button_, SW_HIDE);
         ShowWindow(uninstall_dsh_button_, SW_HIDE);
         ShowWindow(uninstall_node_button_, SW_HIDE);
@@ -1816,7 +1906,14 @@ private:
         }
         if (section == SettingsSection::general) {
             set_text(settings_content_title_, L"通用");
-            set_text(settings_content_detail_, L"启动与更新保持分离。\n下载源仅在“检查更新”页面选择。");
+            set_text(settings_content_detail_, L"设置启动完成后的倒计时行为，\n以及点击右上角 × 时如何处理。");
+            update_tray_setting_button();
+            update_close_setting_button();
+            ShowWindow(settings_tray_button_, SW_SHOW);
+            ShowWindow(settings_close_button_, SW_SHOW);
+            set_text(settings_hint_, L"单击上方按钮即可切换设置。托盘菜单可恢复窗口、打开网页、停止服务或退出。");
+            SetWindowPos(settings_hint_, nullptr, scale(230), scale(342), scale(286), scale(46), SWP_NOZORDER | SWP_NOACTIVATE);
+            ShowWindow(settings_hint_, SW_SHOW);
         } else if (section == SettingsSection::logs) {
             set_text(settings_content_title_, L"日志与诊断");
             set_text(settings_content_detail_, L"首页显示近期运行记录。\n完整日志保存在本机应用数据目录。");
@@ -1841,6 +1938,10 @@ private:
             set_text(settings_hint_, launcher_owned_node
                                           ? L"第二项会一并移除启动器安装的 Node.js。"
                                           : L"当前 Node.js 并非由启动器安装，第二项为保护系统而不可用。");
+            // The general page moves this shared hint upward. Restore the
+            // maintenance layout before showing it so wrapped text cannot
+            // cover the second uninstall button.
+            SetWindowPos(settings_hint_, nullptr, scale(230), scale(404), scale(286), scale(44), SWP_NOZORDER | SWP_NOACTIVATE);
             ShowWindow(settings_hint_, SW_SHOW);
             EnableWindow(uninstall_dsh_button_, can_manage && last_status_.installed);
             EnableWindow(uninstall_all_button_, can_manage && last_status_.installed &&
@@ -1878,6 +1979,112 @@ private:
         std::string error;
         if (!service_.open_web(error)) show_error(error);
         else append_action(L"已使用默认浏览器打开 DSH");
+    }
+
+    void update_tray_setting_button() {
+        set_text(settings_tray_button_, service_.minimize_to_tray()
+                                            ? L"已开启：30 秒后最小化到托盘（单击切换）"
+                                            : L"已关闭：30 秒后自动退出（单击切换）");
+    }
+
+    void toggle_tray_setting() {
+        const bool enabled = !service_.minimize_to_tray();
+        std::string error;
+        if (!service_.set_minimize_to_tray(enabled, error)) {
+            show_error(error);
+            return;
+        }
+        update_tray_setting_button();
+        append_action(enabled ? L"已开启启动后自动最小化到托盘"
+                              : L"已关闭启动后自动最小化到托盘");
+    }
+
+    void update_close_setting_button() {
+        const auto action = service_.close_action();
+        set_text(settings_close_button_, action == dsh::CloseAction::tray
+                                             ? L"关闭按钮：最小化到托盘（单击切换）"
+                                             : action == dsh::CloseAction::exit
+                                                   ? L"关闭按钮：直接退出启动器（单击切换）"
+                                                   : L"关闭按钮：每次询问（点击切换）");
+    }
+
+    void cycle_close_setting() {
+        const auto current = service_.close_action();
+        const auto next = current == dsh::CloseAction::ask ? dsh::CloseAction::tray
+                         : current == dsh::CloseAction::tray ? dsh::CloseAction::exit
+                                                            : dsh::CloseAction::ask;
+        std::string error;
+        if (!service_.set_close_action(next, error)) {
+            show_error(error);
+            return;
+        }
+        update_close_setting_button();
+        append_action(next == dsh::CloseAction::tray ? L"点击 × 将最小化到托盘"
+                      : next == dsh::CloseAction::exit ? L"点击 × 将直接退出启动器"
+                                                      : L"点击 × 时将每次询问");
+    }
+
+    bool ensure_tray_icon() {
+        if (tray_icon_visible_) return true;
+        tray_icon_ = {};
+        tray_icon_.cbSize = sizeof(tray_icon_);
+        tray_icon_.hWnd = hwnd_;
+        tray_icon_.uID = 1;
+        tray_icon_.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+        tray_icon_.uCallbackMessage = message_tray;
+        tray_icon_.hIcon = small_icon_;
+        wcscpy_s(tray_icon_.szTip, L"DSH Launcher");
+        if (!Shell_NotifyIconW(NIM_ADD, &tray_icon_)) return false;
+        tray_icon_visible_ = true;
+        tray_icon_.uVersion = NOTIFYICON_VERSION_4;
+        Shell_NotifyIconW(NIM_SETVERSION, &tray_icon_);
+        return true;
+    }
+
+    void remove_tray_icon() {
+        if (!tray_icon_visible_) return;
+        Shell_NotifyIconW(NIM_DELETE, &tray_icon_);
+        tray_icon_visible_ = false;
+    }
+
+    void minimize_to_tray() {
+        if (!ensure_tray_icon()) {
+            show_notice(L"无法进入系统托盘", L"系统未能创建托盘图标，启动器将保持打开");
+            return;
+        }
+        ShowWindow(hwnd_, SW_HIDE);
+    }
+
+    void restore_from_tray() {
+        ShowWindow(hwnd_, SW_RESTORE);
+        SetForegroundWindow(hwnd_);
+        remove_tray_icon();
+    }
+
+    void show_tray_menu() {
+        HMENU menu = CreatePopupMenu();
+        if (!menu) return;
+        AppendMenuW(menu, MF_STRING, id_tray_restore, L"恢复 DSH Launcher");
+        AppendMenuW(menu, MF_STRING, id_tray_open_web, L"打开 DSH 网页");
+        AppendMenuW(menu, MF_STRING | ((!last_status_.running || busy_.load()) ? MF_GRAYED : 0),
+                    id_tray_stop, L"停止 DSH 服务");
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(menu, MF_STRING, id_tray_exit, L"退出启动器");
+        POINT point{};
+        GetCursorPos(&point);
+        SetForegroundWindow(hwnd_);
+        const UINT command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
+                                            point.x, point.y, 0, hwnd_, nullptr);
+        DestroyMenu(menu);
+        if (command == id_tray_restore) restore_from_tray();
+        else if (command == id_tray_open_web) { restore_from_tray(); open_web(); }
+        else if (command == id_tray_stop) { restore_from_tray(); stop(); }
+        else if (command == id_tray_exit) {
+            if (busy_.load()) {
+                restore_from_tray();
+                show_notice(L"操作正在进行", L"请等待完成，或使用红色取消按钮");
+            } else DestroyWindow(hwnd_);
+        }
     }
 
     void request_uninstall(UninstallTarget target) {
@@ -2049,6 +2256,8 @@ private:
     HWND settings_nav_about_{};
     HWND settings_content_title_{};
     HWND settings_content_detail_{};
+    HWND settings_tray_button_{};
+    HWND settings_close_button_{};
     HWND settings_info_list_{};
     HWND settings_hint_{};
     HWND uninstall_dsh_button_{};
@@ -2064,6 +2273,8 @@ private:
     HBRUSH surface_brush_{};
     HBRUSH class_brush_{};
     HICON small_icon_{};
+    NOTIFYICONDATAW tray_icon_{};
+    bool tray_icon_visible_{};
     bool class_registered_{};
     UINT dpi_{96};
     COLORREF status_color_{primary_color};
@@ -2099,7 +2310,6 @@ private:
     ChoiceMode choice_mode_{ChoiceMode::none};
     Page choice_return_page_{Page::home};
     SettingsSection choice_return_settings_section_{SettingsSection::general};
-    bool open_web_when_closing_{};
     bool close_busy_notice_shown_{};
     bool update_launcher_after_dsh_{};
     bool dsh_version_checked_{};

@@ -14,6 +14,7 @@ namespace dsh {
 
 struct Status {
     bool installed{};
+    bool installation_incomplete{};
     bool running{};
     std::string executable;
     std::string version;
@@ -23,6 +24,12 @@ struct Status {
 enum class InstallSource {
     mirror,
     official,
+};
+
+enum class CloseAction {
+    ask,
+    tray,
+    exit,
 };
 
 struct EnvironmentStatus {
@@ -68,6 +75,10 @@ public:
     [[nodiscard]] std::filesystem::path default_dsh_directory() const;
     [[nodiscard]] InstallSource install_source() const noexcept;
     bool set_install_source(InstallSource source, std::string& error);
+    [[nodiscard]] bool minimize_to_tray() const noexcept;
+    bool set_minimize_to_tray(bool enabled, std::string& error);
+    [[nodiscard]] CloseAction close_action() const noexcept;
+    bool set_close_action(CloseAction action, std::string& error);
     std::optional<std::string> latest_version(const std::atomic_bool* cancel = nullptr);
     std::optional<platform::LauncherUpdate> latest_launcher_update(
         const std::atomic_bool* cancel = nullptr);
@@ -78,6 +89,7 @@ public:
     [[nodiscard]] std::filesystem::path service_log_path() const;
 
 private:
+    bool write_settings(std::string& error) const;
     std::optional<std::uint32_t> read_pid() const;
     bool write_pid(std::uint32_t pid, std::string& error) const;
     void clear_pid() const;
@@ -87,6 +99,8 @@ private:
     std::filesystem::path settings_file_;
     Log log_;
     InstallSource install_source_{InstallSource::mirror};
+    bool minimize_to_tray_{};
+    CloseAction close_action_{CloseAction::ask};
 };
 
 }  // namespace dsh

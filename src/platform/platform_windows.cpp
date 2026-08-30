@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cctype>
 #include <cstdlib>
 #include <cstdio>
@@ -256,6 +257,20 @@ std::wstring quote(const std::filesystem::path& value) {
     return L"\"" + value.wstring() + L"\"";
 }
 
+std::string read_file_tail(const std::filesystem::path& path, std::size_t maximum_bytes) {
+    std::ifstream stream(path, std::ios::binary);
+    if (!stream) return {};
+    stream.seekg(0, std::ios::end);
+    const auto size = stream.tellg();
+    if (size <= 0) return {};
+    const auto bytes = static_cast<std::streamoff>((std::min)(
+        static_cast<std::uintmax_t>(size), static_cast<std::uintmax_t>(maximum_bytes)));
+    stream.seekg(-bytes, std::ios::end);
+    std::string text(static_cast<std::size_t>(bytes), '\0');
+    stream.read(text.data(), bytes);
+    return trim(std::move(text));
+}
+
 std::filesystem::path runtime_directory() {
     return state_directory() / "runtime";
 }
@@ -320,11 +335,29 @@ std::filesystem::path managed_dsh_command() {
     return runtime_directory() / "dsh" / "dsh.cmd";
 }
 
-// Keep the domestic path aligned with the original BAT: use npmmirror first,
-// then fall back to npmjs only when that explicit source is unavailable. A
-// metadata check must never silently fan out across unrelated mirrors.
-constexpr std::array<const char*, 1> domestic_npm_registries{
-    "https://registry.npmmirror.com"};
+// These public domestic npm registries are independently operated. We probe
+// and rank them on the user's own network instead of assuming one mirror is
+// fastest everywhere.
+constexpr std::array<const char*, 3> domestic_npm_registries{
+    "https://registry.npmmirror.com",
+    "https://mirrors.cloud.tencent.com/npm",
+    "https://repo.huaweicloud.com/repository/npm",
+};
+// DSH 0.1.1-rc.2 publishes these app-boot runtime requirements as peer
+// dependencies. npm's normal peer resolver can loop on that graph; install
+// the required peers explicitly while using --legacy-peer-deps. See upstream
+// discussion deepseek-ai/deepseek-harness#4236 for the verified workaround.
+constexpr std::array<const char*, 9> dsh_runtime_peer_packages{
+    "@deepseek-ai/cordis-plugin-group",
+    "@deepseek-ai/cordis-plugin-loader",
+    "@deepseek-ai/dsh-launch-environment",
+    "@deepseek-ai/dsh-invariants",
+    "@deepseek-ai/cordis-plugin-hmr",
+    "@deepseek-ai/cordis-plugin-include",
+    "@deepseek-ai/dsh-home-paths",
+    "@deepseek-ai/dsh-system-prompt",
+    "@deepseek-ai/cordis",
+};
 constexpr const char* official_npm_registry = "https://registry.npmjs.org";
 constexpr const char* launcher_manifest_gitee =
     "https://gitee.com/taylorchengitee/dsh-desktop-launcher/raw/main/packaging/manifests/update-manifest.json";
@@ -354,7 +387,10 @@ NpmMemoryPolicy npm_memory_policy() {
     constexpr std::size_t gib = 1024ULL * 1024ULL * 1024ULL;
     constexpr std::size_t minimum_job_limit = 2ULL * gib;
     constexpr std::size_t maximum_job_limit = 4ULL * gib;
-    constexpr std::size_t system_reserve = 1ULL * gib;
+    // DSH is stopped before an update, so retaining a full GiB of *available*
+    // memory as a second reserve leaves smaller PCs stuck in V8 garbage
+    // collection. The Job limit remains bounded; this only changes its ceiling.
+    constexpr std::size_t system_reserve = 512ULL * 1024 * 1024;
     MEMORYSTATUSEX memory{};
     memory.dwLength = sizeof(memory);
     if (!GlobalMemoryStatusEx(&memory) || memory.ullAvailPhys <= system_reserve) {
@@ -363,9 +399,9 @@ NpmMemoryPolicy npm_memory_policy() {
     const auto available_after_reserve = static_cast<std::size_t>(memory.ullAvailPhys - system_reserve);
     const auto job_limit = (std::min)(maximum_job_limit,
                                       (std::max)(minimum_job_limit, available_after_reserve));
-    const auto v8_heap_mib = job_limit >= 3584ULL * 1024ULL * 1024ULL ? 3072U
-                           : job_limit >= 2560ULL * 1024ULL * 1024ULL ? 2048U
-                                                                          : 1536U;
+    const auto v8_heap_mib = memory.ullAvailPhys >= 3584ULL * 1024ULL * 1024ULL ? 3072U
+                           : memory.ullAvailPhys >= 2560ULL * 1024ULL * 1024ULL ? 2048U
+                                                                                   : 1536U;
     return {job_limit, v8_heap_mib};
 }
 
@@ -836,6 +872,19 @@ std::optional<std::string> find_dsh() {
     return path.empty() ? std::nullopt : std::optional<std::string>(path);
 }
 
+std::optional<std::filesystem::path> remembered_dsh_directory() {
+    std::ifstream stream(remembered_dsh_file());
+    std::string remembered;
+    std::getline(stream, remembered);
+    if (remembered.empty()) return std::nullopt;
+    const auto executable = std::filesystem::path(utf8_to_wide(remembered));
+    auto prefix = executable.parent_path();
+    if (prefix.filename() == L".bin" && prefix.parent_path().filename() == L"node_modules") {
+        prefix = prefix.parent_path().parent_path();
+    }
+    return prefix.empty() ? std::nullopt : std::optional<std::filesystem::path>(prefix);
+}
+
 bool has_node() {
     if (std::filesystem::exists(preferred_node_directory() / "node.exe")) return true;
     return capture("where.exe node.exe 2>nul").exit_code == 0;
@@ -1006,7 +1055,9 @@ bool install_dsh_at(const std::filesystem::path& prefix, bool official_source, s
         error = "DSH 安装目录不能为空。";
         return false;
     }
-    if (!has_update_memory_budget(error)) return false;
+    const auto report = [&progress](const std::string& message) {
+        if (progress) progress(message);
+    };
     const auto update_lock = CreateMutexW(nullptr, TRUE, L"Local\\DshLauncher.DshInstall");
     if (!update_lock || GetLastError() == ERROR_ALREADY_EXISTS) {
         if (update_lock) CloseHandle(update_lock);
@@ -1023,40 +1074,128 @@ bool install_dsh_at(const std::filesystem::path& prefix, bool official_source, s
         error = "无法创建 DSH 安装目录。";
         return false;
     }
+    // Never run npm against the live program files. A cancelled npm install
+    // can otherwise leave a package-lock from the new version beside a partly
+    // removed node_modules tree. Only these program artifacts are swapped;
+    // user-owned home, plugins and DSH_HOME content remain in place.
+    constexpr std::array<const wchar_t*, 3> program_artifacts{
+        L"node_modules", L"package.json", L"package-lock.json"};
+    const auto staging = prefix / L".dsh-launcher-staging";
+    const auto rollback = prefix / L".dsh-launcher-rollback";
+    const auto retired_backup = prefix / (L".dsh-launcher-retired-" +
+                                           std::to_wstring(GetCurrentProcessId()) + L"-" +
+                                           std::to_wstring(GetTickCount64()));
+    const auto recover_interrupted_commit = [&] {
+        if (!std::filesystem::exists(rollback)) return true;
+        // beta.9 used remove_all on this backup after a successful swap. If
+        // the launcher was closed while that deletion ran, the new live copy
+        // is valid but the remaining backup is no longer safe to restore.
+        // Restore only a structurally complete old program tree.
+        const auto saved_shim = rollback / "node_modules" / ".bin" / "dsh.cmd";
+        const bool backup_complete = std::filesystem::exists(rollback / "node_modules") &&
+                                     std::filesystem::exists(rollback / "package.json") &&
+                                     std::filesystem::exists(rollback / "package-lock.json") &&
+                                     std::filesystem::exists(rollback / "node_modules" / "@deepseek-ai" / "dsh" / "package.json") &&
+                                     std::filesystem::exists(saved_shim) &&
+                                     !dsh_version(path_utf8(saved_shim)).empty();
+        if (!backup_complete) {
+            std::filesystem::rename(rollback, retired_backup, filesystem_error);
+            if (filesystem_error) {
+                error = "检测到不完整的旧 DSH 备份，但无法将其隔离：" + filesystem_error.message();
+                return false;
+            }
+            report("已忽略上次中断时残留的不完整旧备份，保留已校验的新 DSH 文件");
+            return true;
+        }
+        const auto interrupted = prefix / (L".dsh-launcher-interrupted-" +
+                                           std::to_wstring(GetCurrentProcessId()));
+        std::filesystem::create_directories(interrupted, filesystem_error);
+        if (filesystem_error) {
+            error = "检测到未完成的 DSH 更新，但无法创建恢复目录：" + filesystem_error.message();
+            return false;
+        }
+        for (const auto* name : program_artifacts) {
+            const auto saved = rollback / name;
+            if (!std::filesystem::exists(saved)) continue;
+            const auto live = prefix / name;
+            if (std::filesystem::exists(live)) {
+                std::filesystem::rename(live, interrupted / name, filesystem_error);
+                if (filesystem_error) {
+                    error = "无法保留上次未完成更新的文件：" + filesystem_error.message();
+                    return false;
+                }
+            }
+            std::filesystem::rename(saved, live, filesystem_error);
+            if (filesystem_error) {
+                error = "无法恢复上次更新前的 DSH 文件：" + filesystem_error.message();
+                return false;
+            }
+        }
+        std::filesystem::remove_all(rollback, filesystem_error);
+        if (filesystem_error) {
+            error = "已恢复 DSH 文件，但无法清理恢复标记：" + filesystem_error.message();
+            return false;
+        }
+        report("已恢复上次中断更新前的 DSH 程序文件");
+        return true;
+    };
+    if (!recover_interrupted_commit()) return false;
+    if (std::filesystem::exists(staging)) {
+        std::filesystem::remove_all(staging, filesystem_error);
+        if (filesystem_error) {
+            error = "无法清理上次未完成的 DSH 临时安装目录：" + filesystem_error.message();
+            return false;
+        }
+    }
+    std::filesystem::create_directories(staging, filesystem_error);
+    if (filesystem_error) {
+        error = "无法创建 DSH 隔离安装目录。";
+        return false;
+    }
     const auto node_directory = preferred_node_directory();
     const auto npm = executable_command(node_directory / "npm.cmd", "npm.cmd");
     const auto node_path = path_utf8(node_directory);
-    const auto prefix_path = path_utf8(prefix);
-    // Keep npm peer dependency resolution enabled. DSH's boot package requires
-    // peer plugins that are omitted when --legacy-peer-deps is used.
+    const auto prefix_path = path_utf8(staging);
     const auto package = requested_version.empty() ? std::string("@deepseek-ai/dsh")
                                                    : "@deepseek-ai/dsh@" + requested_version;
+    std::string runtime_packages = package;
+    for (const auto* peer : dsh_runtime_peer_packages) runtime_packages += " \"" + std::string(peer) + "\"";
     const std::string options = " install --prefix \"" + prefix_path +
-                                "\" " + package +
-                                " --no-fund --no-audit";
+                                "\" " + runtime_packages +
+                                " --legacy-peer-deps --no-fund --no-audit --prefer-offline"
+                                " --replace-registry-host=always";
+    // The staging prefix deliberately starts with a fresh lockfile, so an old
+    // live install can never force downloads back to a previously selected
+    // mirror. replace-registry-host is retained for npm's own cached metadata.
     // The original BAT carries an --allow-scripts allow-list. npm 11.9.0
     // reports that option as unknown, while normal npm installs already run
     // package scripts by default. Do not pass a legacy no-op flag that merely
     // emits a warning and creates a misleading extra retry.
-    const auto report = [&progress](const std::string& message) {
-        if (progress) progress(message);
-    };
-    std::vector<const char*> registries;
+    std::vector<std::pair<const char*, std::uint64_t>> registries;
     std::vector<std::string> probe_diagnostics;
     const auto probe_registry = [&](const char* registry) {
         if (cancel && cancel->load()) return false;
         report(std::string("正在检查 npm 源：") + registry);
+        const auto started = std::chrono::steady_clock::now();
         std::vector<unsigned char> body;
         std::string probe_error;
         if (download(std::string(registry) + "/@deepseek-ai%2fdsh/latest", body, probe_error,
                      4 * 1024 * 1024, cancel)) {
-            report(std::string("npm 源元数据连接成功：") + registry);
+            const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - started).count();
+            registries.emplace_back(registry, static_cast<std::uint64_t>(elapsed));
+            report(std::string("npm 源元数据连接成功：") + registry +
+                   "；测速=" + std::to_string(elapsed) + " ms");
             return true;
         }
         if (cancel && cancel->load()) return false;
         std::string npm_diagnostic;
         if (npm_query_version(registry, cancel, &npm_diagnostic)) {
-            report(std::string("npm 命令回退连接成功：") + registry);
+            const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - started).count();
+            registries.emplace_back(registry, static_cast<std::uint64_t>(elapsed));
+            report(std::string("npm 命令回退连接成功：") + registry +
+                   "；测速=" + std::to_string(elapsed) + " ms");
             return true;
         }
         const auto diagnostic = std::string(registry) + " => " +
@@ -1067,16 +1206,11 @@ bool install_dsh_at(const std::filesystem::path& prefix, bool official_source, s
         return false;
     };
     if (official_source) {
-        if (probe_registry(official_npm_registry)) registries.push_back(official_npm_registry);
+        probe_registry(official_npm_registry);
     } else {
         for (const auto* registry : domestic_npm_registries) {
             if (cancel && cancel->load()) break;
-            if (probe_registry(registry)) {
-                registries.push_back(registry);
-            }
-        }
-        if (!(cancel && cancel->load()) && probe_registry(official_npm_registry)) {
-            registries.push_back(official_npm_registry);
+            probe_registry(registry);
         }
     }
     if (registries.empty()) {
@@ -1088,6 +1222,12 @@ bool install_dsh_at(const std::filesystem::path& prefix, bool official_source, s
             for (const auto& diagnostic : probe_diagnostics) error += "\n- " + diagnostic;
         }
         return false;
+    }
+    std::stable_sort(registries.begin(), registries.end(),
+                     [](const auto& left, const auto& right) { return left.second < right.second; });
+    if (!official_source) {
+        report(std::string("已选择最快国内 npm 源：") + registries.front().first +
+               "；测速=" + std::to_string(registries.front().second) + " ms");
     }
     // DSH has a large peer graph. Keep npm below a dynamic ceiling while
     // reserving memory for Windows. The former fixed 1 GiB V8/2 GiB Job cap
@@ -1101,11 +1241,27 @@ bool install_dsh_at(const std::filesystem::path& prefix, bool official_source, s
     }
     const auto proxy = local_http_proxy();
     const auto memory_policy = npm_memory_policy();
+    const auto latest_npm_debug_tail = [&] {
+        const auto log_directory = npm_cache / "_logs";
+        std::error_code log_error;
+        std::filesystem::path newest_log;
+        std::filesystem::file_time_type newest_time{};
+        for (const auto& entry : std::filesystem::directory_iterator(log_directory, log_error)) {
+            if (log_error || !entry.is_regular_file(log_error)) continue;
+            const auto modified = entry.last_write_time(log_error);
+            if (log_error) continue;
+            if (newest_log.empty() || modified > newest_time) {
+                newest_log = entry.path();
+                newest_time = modified;
+            }
+        }
+        return newest_log.empty() ? std::string{} : read_file_tail(newest_log, 8192);
+    };
     const auto make_command = [&](const char* registry, bool official_fallback) {
         std::string command = "set \"PATH=" + node_path + ";%PATH%\" && "
                "set \"npm_config_cache=" + path_utf8(npm_cache) + "\" && "
                "set \"NODE_OPTIONS=--max-old-space-size=" + std::to_string(memory_policy.v8_heap_mib) + "\" && "
-               "set \"npm_config_maxsockets=4\" && "
+               "set \"npm_config_maxsockets=12\" && "
                "set \"npm_config_foreground_scripts=true\" && ";
         if (proxy) {
             command += "set \"HTTP_PROXY=" + *proxy + "\" && set \"HTTPS_PROXY=" + *proxy + "\" && ";
@@ -1124,7 +1280,7 @@ bool install_dsh_at(const std::filesystem::path& prefix, bool official_source, s
     const auto mib = [](std::size_t bytes) { return bytes / (1024ULL * 1024ULL); };
     const auto summarize = [&](const char* registry, const CommandResult& result) {
         std::string text = std::string("npm 尝试结束：源=") + registry +
-                           "; 模式=BAT 标准安装" +
+                           "; 模式=显式运行时 peer 依赖" +
                            "; 耗时=" + std::to_string(result.elapsed_ms / 1000) + " 秒" +
                            "; 退出码=" + std::to_string(result.exit_code) +
                            "; Job 峰值内存=" + std::to_string(mib(result.peak_job_memory)) + " MiB" +
@@ -1137,12 +1293,12 @@ bool install_dsh_at(const std::filesystem::path& prefix, bool official_source, s
     report("npm 内存保护：V8 上限=" + std::to_string(memory_policy.v8_heap_mib) +
            " MiB；任务组上限=" + std::to_string(mib(memory_policy.job_limit)) + " MiB");
     const auto run_attempt = [&](const char* registry, bool official_fallback) {
-        report(std::string("正在通过 ") + registry + " 更新 DSH（BAT 标准安装）");
-        // DSH 0.1.1's npm dependency graph can spend more than five minutes
-        // in idealTree before downloading packages. The original BAT lets that
-        // command finish. A 15-minute wall clock limit still bounds a broken
-        // task, while cancellation, per-fetch limits and the Job memory limit
-        // keep it safe and the heartbeat keeps the UI observable.
+        report(std::string("正在通过 ") + registry + " 更新 DSH（已补齐运行时 peer 依赖）");
+        // The regular npm peer resolver loops on DSH 0.1.1-rc.2's app-boot
+        // graph. The peer packages above are explicit, so legacy mode skips
+        // only the faulty automatic peer resolution, not the required files.
+        // Keep one bounded task, cancellation, per-fetch limits and the Job
+        // memory limit around this workaround.
         const auto result = capture(make_command(registry, official_fallback), 15 * 60 * 1000,
                                     memory_policy.job_limit, cancel, report);
         const auto summary = summarize(registry, result);
@@ -1152,26 +1308,143 @@ bool install_dsh_at(const std::filesystem::path& prefix, bool official_source, s
     };
     CommandResult result;
     bool installed_ok = false;
-    for (const auto* registry : registries) {
+    std::string npm_debug_tail;
+    for (const auto& candidate : registries) {
+        const auto* registry = candidate.first;
         const bool official_fallback = std::string(registry) == official_npm_registry;
         result = run_attempt(registry, official_fallback);
         if (result.exit_code == 0) { installed_ok = true; break; }
+        npm_debug_tail = latest_npm_debug_tail();
         if (result.cancelled) break;
+        if (result.timed_out) {
+            report("当前 npm 源的依赖解析已超时；为避免重复长任务，已停止切换源。请查看日志中的测速和 npm 输出。");
+            break;
+        }
     }
     // npm installs package executables into <prefix>\\node_modules\\.bin
-    // when using --prefix (without -g). Keep the exact shim path because it
-    // contains the correct relative package path and works for custom dirs.
-    auto installed = prefix / "node_modules" / ".bin" / "dsh.cmd";
-    if (!std::filesystem::exists(installed)) installed = prefix / "dsh.cmd";
-    if (!installed_ok || !std::filesystem::exists(installed)) {
-        error = result.output.empty() ? "DSH 下载失败。" : result.output;
+    // when using --prefix (without -g). Validate the *staged* shim before
+    // making any change to the live install.
+    auto staged_installed = staging / "node_modules" / ".bin" / "dsh.cmd";
+    if (!std::filesystem::exists(staged_installed)) staged_installed = staging / "dsh.cmd";
+    if (!installed_ok || !std::filesystem::exists(staged_installed)) {
+        if (result.timed_out) {
+            error = "所选 npm 源的 DSH 依赖解析超过 15 分钟，已停止该次更新；没有继续切换源重复长任务。";
+        } else {
+            error = result.output.empty() ? "DSH 下载失败。" : result.output;
+        }
         if (!attempt_summaries.empty()) {
             error += "\n诊断：";
             for (const auto& summary : attempt_summaries) error += "\n- " + summary;
         }
+        if (!npm_debug_tail.empty()) {
+            error += "\nnpm 调试日志末尾：\n" + npm_debug_tail;
+        }
+        std::filesystem::remove_all(staging, filesystem_error);
+        return false;
+    }
+    const auto staged_version = first_line(capture("set \"PATH=" + node_path + ";%PATH%\" && \"" +
+                                                   path_utf8(staged_installed) + "\" --version 2>nul").output);
+    if (staged_version.empty() || (!requested_version.empty() && staged_version != requested_version)) {
+        error = "DSH 已下载到隔离目录，但版本校验未通过：期望 " +
+                (requested_version.empty() ? std::string("可执行版本") : requested_version) +
+                "，实际 " + (staged_version.empty() ? std::string("未知") : staged_version) +
+                "；原 DSH 未修改。";
+        std::filesystem::remove_all(staging, filesystem_error);
+        return false;
+    }
+    if (cancel && cancel->load()) {
+        error = "用户已取消更新，原 DSH 程序文件未修改。";
+        std::filesystem::remove_all(staging, filesystem_error);
+        return false;
+    }
+
+    report("DSH 已在隔离目录完成校验，正在安全替换程序文件");
+    std::filesystem::create_directories(rollback, filesystem_error);
+    if (filesystem_error) {
+        error = "无法创建 DSH 更新备份目录，已取消替换：" + filesystem_error.message();
+        std::filesystem::remove_all(staging, filesystem_error);
+        return false;
+    }
+    std::vector<const wchar_t*> original_moved;
+    std::vector<const wchar_t*> staged_moved;
+    const auto restore_live_program_files = [&] {
+        std::string restore_error;
+        for (auto it = staged_moved.rbegin(); it != staged_moved.rend(); ++it) {
+            const auto live = prefix / *it;
+            const auto staged = staging / *it;
+            if (!std::filesystem::exists(live)) continue;
+            std::filesystem::rename(live, staged, filesystem_error);
+            if (filesystem_error && restore_error.empty()) restore_error = filesystem_error.message();
+        }
+        for (auto it = original_moved.rbegin(); it != original_moved.rend(); ++it) {
+            const auto saved = rollback / *it;
+            const auto live = prefix / *it;
+            if (!std::filesystem::exists(saved)) continue;
+            std::filesystem::rename(saved, live, filesystem_error);
+            if (filesystem_error && restore_error.empty()) restore_error = filesystem_error.message();
+        }
+        return restore_error;
+    };
+    for (const auto* name : program_artifacts) {
+        const auto staged = staging / name;
+        const auto live = prefix / name;
+        const auto saved = rollback / name;
+        if (!std::filesystem::exists(staged)) {
+            error = "隔离安装缺少必要文件，已取消替换：" + path_utf8(staged);
+            break;
+        }
+        if (std::filesystem::exists(live)) {
+            std::filesystem::rename(live, saved, filesystem_error);
+            if (filesystem_error) {
+                error = "无法备份现有 DSH 文件：" + filesystem_error.message();
+                break;
+            }
+            original_moved.push_back(name);
+        }
+        std::filesystem::rename(staged, live, filesystem_error);
+        if (filesystem_error) {
+            error = "无法替换 DSH 程序文件：" + filesystem_error.message();
+            break;
+        }
+        staged_moved.push_back(name);
+    }
+    if (!error.empty()) {
+        const auto restore_error = restore_live_program_files();
+        if (!restore_error.empty()) error += "；自动恢复旧 DSH 文件失败：" + restore_error;
+        std::filesystem::remove_all(staging, filesystem_error);
+        if (restore_error.empty()) std::filesystem::remove_all(rollback, filesystem_error);
+        return false;
+    }
+    auto installed = prefix / "node_modules" / ".bin" / "dsh.cmd";
+    if (!std::filesystem::exists(installed)) installed = prefix / "dsh.cmd";
+    const auto installed_version = std::filesystem::exists(installed)
+        ? first_line(capture("set \"PATH=" + node_path + ";%PATH%\" && \"" +
+                             path_utf8(installed) + "\" --version 2>nul").output)
+        : std::string{};
+    if (installed_version.empty() || (!requested_version.empty() && installed_version != requested_version)) {
+        error = "新 DSH 文件替换后版本校验失败，正在恢复旧版本。";
+        const auto restore_error = restore_live_program_files();
+        if (!restore_error.empty()) error += "自动恢复旧 DSH 文件失败：" + restore_error;
+        std::filesystem::remove_all(staging, filesystem_error);
+        if (restore_error.empty()) std::filesystem::remove_all(rollback, filesystem_error);
+        return false;
+    }
+    // Directory rename is atomic on this volume. Do not recursively delete an
+    // old node_modules tree while the user is waiting: on HDDs it can take
+    // many minutes and made beta.9 look permanently stuck. The retired backup
+    // is intentionally left for later maintenance, never touched on startup.
+    std::filesystem::rename(rollback, retired_backup, filesystem_error);
+    if (filesystem_error) {
+        error = "新 DSH 已通过校验，但无法把旧备份转入延后清理：" + filesystem_error.message();
+        return false;
+    }
+    std::filesystem::remove_all(staging, filesystem_error);
+    if (filesystem_error) {
+        error = "DSH 已更新，但无法清理隔离目录：" + filesystem_error.message();
         return false;
     }
     remember_dsh(installed);
+    report("DSH 程序文件已安全替换并通过版本校验；旧备份已转入延后清理");
     return true;
 }
 
@@ -1281,6 +1554,23 @@ bool uninstall_launcher_owned_node(std::string& error) {
 std::string dsh_version(const std::string& executable) {
     const auto node_path = path_utf8(managed_node_directory());
     return first_line(capture("set \"PATH=" + node_path + ";%PATH%\" && \"" + executable + "\" --version 2>nul").output);
+}
+
+std::optional<std::string> verified_dsh_version(const std::string& executable) {
+    const auto command = std::filesystem::path(utf8_to_wide(executable));
+    if (!std::filesystem::exists(command)) return std::nullopt;
+    auto prefix = command.parent_path();
+    if (prefix.filename() == L".bin" && prefix.parent_path().filename() == L"node_modules") {
+        prefix = prefix.parent_path().parent_path();
+    }
+    // Do not trust a surviving dsh.cmd on its own. npm can leave that wrapper
+    // behind after removing the package it points to when an old update is
+    // interrupted.
+    if (!std::filesystem::exists(prefix / "node_modules" / "@deepseek-ai" / "dsh" / "package.json")) {
+        return std::nullopt;
+    }
+    const auto version = dsh_version(executable);
+    return version.empty() ? std::nullopt : std::optional<std::string>(version);
 }
 
 std::optional<std::string> latest_dsh_version(bool official_source, const std::atomic_bool* cancel,
@@ -1664,9 +1954,29 @@ bool is_web_running() {
             }
         }
     }
+    bool healthy = false;
+    if (connected) {
+        static constexpr char request[] = "GET / HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n";
+        const int sent = send(socket_handle, request, static_cast<int>(sizeof(request) - 1), 0);
+        if (sent == static_cast<int>(sizeof(request) - 1)) {
+            fd_set readable{};
+            FD_SET(socket_handle, &readable);
+            timeval timeout{};
+            timeout.tv_sec = 0;
+            timeout.tv_usec = 500000;
+            if (select(0, &readable, nullptr, nullptr, &timeout) > 0 && FD_ISSET(socket_handle, &readable)) {
+                std::array<char, 32> response{};
+                const int received = recv(socket_handle, response.data(), static_cast<int>(response.size() - 1), 0);
+                if (received >= 12 && std::string_view(response.data(), static_cast<std::size_t>(received)).starts_with("HTTP/")) {
+                    const auto status = std::string_view(response.data(), static_cast<std::size_t>(received)).substr(9, 3);
+                    healthy = status.size() == 3 && status[0] >= '2' && status[0] <= '3';
+                }
+            }
+        }
+    }
     closesocket(socket_handle);
     WSACleanup();
-    return connected;
+    return healthy;
 }
 
 std::optional<std::uint32_t> start_dsh(
