@@ -18,6 +18,7 @@ struct Status {
     bool running{};
     std::string executable;
     std::string version;
+    std::string integrity_problem;
     std::optional<std::uint32_t> pid;
 };
 

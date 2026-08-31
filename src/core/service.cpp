@@ -31,39 +31,34 @@ Service::Service()
 
 Status Service::detect() {
     Status status;
-    status.running = platform::is_web_running();
     status.pid = read_pid();
-    if (const auto executable = platform::find_dsh()) {
-        status.executable = *executable;
-        if (const auto version = platform::verified_dsh_version(*executable)) {
-            status.installed = true;
-            status.version = *version;
-        } else {
-            status.installation_incomplete = true;
-        }
-    }
-    if (!status.installed && !status.installation_incomplete) {
-        if (const auto remembered = platform::remembered_dsh_directory();
-            remembered && std::filesystem::exists(*remembered)) {
-            status.installation_incomplete = true;
-        }
-    }
+    const auto integrity = platform::inspect_dsh_installation();
+    status.executable = integrity.executable;
+    status.version = integrity.version;
+    status.installed = integrity.complete;
+    status.installation_incomplete = integrity.found && !integrity.complete;
+    status.integrity_problem = integrity.problem;
+    // A healthy port is not enough: an interrupted install may leave a short-
+    // lived listener or an unrelated process on 3080. Only a complete DSH can
+    // be represented as running.
+    status.running = status.installed && platform::is_web_running();
     return status;
 }
 
 bool Service::is_running() const { return platform::is_web_running(); }
 
 bool Service::start(std::string& error) {
-    if (platform::is_web_running()) {
-        return true;
-    }
     const auto current = detect();
     if (!current.installed || current.executable.empty()) {
         error = current.installation_incomplete
-                    ? "检测到 DSH 安装不完整，请使用“修复 DSH”在原安装目录重新安装。"
+                    ? "检测到 DSH 安装不完整（" +
+                          (current.integrity_problem.empty() ? std::string("关键资源校验失败")
+                                                             : current.integrity_problem) +
+                          "），请使用“修复 DSH”在原安装目录重新安装。"
                     : "未检测到 dsh，请先安装 DeepSeek Harness。";
         return false;
     }
+    if (current.running) return true;
     const auto service_log = state_directory_ / "logs" / "dsh-web.log";
     const auto pid = platform::start_dsh(current.executable, service_log, error);
     if (!pid) {
@@ -112,7 +107,14 @@ bool Service::stop(std::string& error) {
 }
 
 bool Service::open_web(std::string& error) {
-    if (!platform::is_web_running()) {
+    const auto current = detect();
+    if (!current.installed) {
+        error = current.installation_incomplete
+                    ? "DSH 资源完整性检查未通过（" + current.integrity_problem + "），请先修复 DSH。"
+                    : "未检测到完整的 DSH 安装，请先安装 DSH。";
+        return false;
+    }
+    if (!current.running) {
         error = "DSH Web 服务没有通过 HTTP 健康检查，未打开浏览器；请先启动或修复 DSH。";
         return false;
     }
@@ -134,6 +136,10 @@ bool Service::install_at(const std::filesystem::path& directory, InstallSource s
     if (cancel && cancel->load()) {
         error = "用户已取消安装。";
         return false;
+    }
+    if (platform::is_web_running()) {
+        report("正在停止当前 DSH 服务，以便安全修复或安装程序文件");
+        if (!stop(error)) return false;
     }
     if (!platform::has_node() || !platform::has_npm()) {
         const bool use_system_node = node_options && node_options->install_system_node;
@@ -162,8 +168,12 @@ bool Service::install_at(const std::filesystem::path& directory, InstallSource s
         log_.error("Managed DSH installation failed: " + error);
         return false;
     }
-    if (!platform::find_dsh()) {
-        error = "安装命令已完成，但未找到 DSH 可执行文件。";
+    auto executable = directory / "node_modules" / ".bin" / "dsh.cmd";
+    if (!std::filesystem::exists(executable)) executable = directory / "dsh.cmd";
+    const auto integrity = platform::inspect_dsh_installation_at(
+        directory, executable, platform::has_node() && !platform::node_version().empty());
+    if (!integrity.complete) {
+        error = "安装命令已完成，但目标目录完整性校验失败：" + integrity.problem;
         return false;
     }
     report("DSH 安装完成并已通过校验");

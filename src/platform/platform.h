@@ -17,11 +17,33 @@ struct LauncherUpdate {
     std::string sha256;
 };
 
+struct DshIntegrity {
+    bool found{};
+    bool complete{};
+    bool node_available{};
+    bool shim_present{};
+    bool package_present{};
+    bool version_valid{};
+    bool version_matches_package{};
+    bool transaction_pending{};
+    std::filesystem::path prefix;
+    std::string executable;
+    std::string version;
+    std::string problem;
+};
+
 std::filesystem::path state_directory();
 std::optional<std::string> find_dsh();
 // Returns the prefix saved by the launcher even if a cancelled older launcher
 // left its dsh shim missing.  Callers use it only as a repair destination.
 std::optional<std::filesystem::path> remembered_dsh_directory();
+// Performs the complete pre-start integrity check. The overload taking an
+// explicit prefix is also used to verify the exact target of an install or
+// update instead of accidentally accepting another dsh found on PATH.
+DshIntegrity inspect_dsh_installation();
+DshIntegrity inspect_dsh_installation_at(const std::filesystem::path& prefix,
+                                         const std::filesystem::path& executable,
+                                         bool node_available);
 std::string dsh_version(const std::string& executable);
 // Returns a version only after checking both the launch shim and the DSH core
 // package.  An interrupted install is deliberately reported as incomplete.
@@ -54,6 +76,7 @@ bool install_dsh_at(const std::filesystem::path& directory, bool official_source
                     const std::function<void(const std::string&)>& progress = {});
 bool install_managed_dsh(std::string& error);
 bool uninstall_dsh(std::string& error);
+bool cleanup_launcher_artifact(const std::filesystem::path& directory);
 // Deletes only DSH session/local-storage directories, never credentials,
 // settings, profiles, logs, or the DSH_HOME root itself.
 bool clear_conversation_memory(std::string& error);

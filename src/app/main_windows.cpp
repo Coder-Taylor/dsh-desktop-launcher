@@ -982,7 +982,7 @@ private:
         if (action_mode_ == ActionMode::install_ready) {
             if (id == id_primary) start_install(pending_dsh_directory_, false);
             else if (id == id_stop) show_dsh_directory_step();
-            else if (id == id_check_updates) show_install_prompt(last_status_, initial_environment_);
+            else if (id == id_check_updates) show_node_source_step();
             return;
         }
         if (id == id_primary) running_ ? open_web() : start_existing();
@@ -1049,7 +1049,9 @@ private:
                 set_text(status_label_, status.installed ? L"● DSH 已停止" :
                                             status.installation_incomplete ? L"● DSH 安装不完整" : L"● 尚未安装 DSH");
                 set_text(detail_label_, status.installed ? L"需要时点击启动 DSH" :
-                                            status.installation_incomplete ? L"点击修复 DSH，将在原安装目录安全重装"
+                                            status.installation_incomplete
+                                                ? (L"完整性检查：" + utf8_to_wide(status.integrity_problem) +
+                                                   L"。点击修复后在原目录安全重装")
                                                                            : L"点击启动 DSH 后选择安装位置");
                 set_text(primary_button_, status.installed ? L"启动 DSH" :
                                             status.installation_incomplete ? L"修复 DSH" : L"安装 DSH");
@@ -1079,7 +1081,8 @@ private:
         show_home(status);
         action_mode_ = ActionMode::install_prompt;
         const auto repair_directory = service_.default_dsh_directory();
-        const bool can_repair_previous_install = std::filesystem::exists(repair_directory);
+        const bool can_repair_previous_install = status.installation_incomplete ||
+                                                 std::filesystem::exists(repair_directory);
         set_text(status_label_, can_repair_previous_install ? L"● 检测到未完成的 DSH 安装" : L"● 检测到尚未安装 DSH");
         if (can_repair_previous_install) {
             set_text(detail_label_, L"将优先在原安装目录重新安装并修复，不会新建第二份 DSH。 ");
@@ -1147,22 +1150,32 @@ private:
         const auto environment = service_.environment();
         initial_environment_ = environment;
         append_action(L"已选择 DSH 目录：" + directory.wstring());
-        if (environment.has_node && environment.has_npm) show_dsh_install_confirmation();
-        else show_node_source_step();
+        show_node_source_step();
     }
 
     void show_node_source_step() {
-        show_install_step(L"安装 Node.js LTS", L"DSH 依赖 Node.js 与 npm。国内镜像适合中国大陆网络；官方源通常需要稳定的国际网络。",
+        const bool node_ready = initial_environment_.has_node && initial_environment_.has_npm;
+        show_install_step(L"选择下载源",
+                          node_ready
+                              ? L"该选择用于下载 DSH。国内镜像适合中国大陆网络；官方源需要能稳定访问 npmjs.org。"
+                              : L"该选择同时用于下载 Node.js 与 DSH。国内镜像适合中国大陆网络；官方源需要稳定的国际网络。",
                           L"国内镜像", L"官方源", L"上一步", ActionMode::install_node_source);
-        set_text(footer_label_, L"Node.js 将安装为系统运行环境；下一步可选择默认或自定义目录");
-        append_action(L"Node.js 未就绪，等待选择下载源");
+        set_text(footer_label_, node_ready
+                                    ? L"下一步会明确显示 DSH 安装目录与所选 npm 源"
+                                    : L"Node.js 将安装为系统运行环境；下一步可选择默认或自定义目录");
+        append_action(node_ready ? L"等待选择 DSH 下载源" : L"Node.js 未就绪，等待选择 Node.js 与 DSH 下载源");
     }
 
     void select_node_source(dsh::InstallSource source) {
         pending_node_source_ = source;
-        append_action(source == dsh::InstallSource::mirror ? L"Node.js 下载源：国内镜像（npmmirror）"
-                                                            : L"Node.js 下载源：官方源（winget）");
-        show_node_directory_step();
+        const bool node_ready = initial_environment_.has_node && initial_environment_.has_npm;
+        append_action(source == dsh::InstallSource::mirror
+                          ? (node_ready ? L"DSH 下载源：国内镜像（npmmirror）"
+                                        : L"Node.js 与 DSH 下载源：国内镜像（npmmirror）")
+                          : (node_ready ? L"DSH 下载源：官方 npm 源"
+                                        : L"Node.js 与 DSH 下载源：官方源（winget / npmjs）"));
+        if (node_ready) show_dsh_install_confirmation();
+        else show_node_directory_step();
     }
 
     void show_node_directory_step() {
@@ -1174,16 +1187,25 @@ private:
 
     void select_node_directory(const std::filesystem::path& directory) {
         pending_node_directory_ = directory;
-        show_install_step(L"需要管理员授权", L"将使用 Windows 安装器安装 Node.js LTS；系统会弹出 UAC 确认。授权后安装 Node.js，再从国内 npm 镜像安装 DSH。",
+        show_install_step(L"需要管理员授权",
+                          pending_node_source_ == dsh::InstallSource::mirror
+                              ? L"将使用 Windows 安装器安装 Node.js LTS；系统会弹出 UAC 确认。授权后再从国内 npm 镜像安装 DSH。"
+                              : L"将通过 winget 安装 Node.js LTS；系统可能弹出 UAC 确认。授权后再从官方 npm 源安装 DSH。",
                           L"授权并安装", L"取消", L"上一步", ActionMode::install_node_permission);
         set_text(footer_label_, L"Node.js 目录：" + directory.wstring());
         append_action(L"已选择 Node.js 目录，等待管理员授权");
     }
 
     void show_dsh_install_confirmation() {
-        show_install_step(L"准备安装 DSH", L"Node.js 与 npm 已可用。将使用国内 npm 镜像安装 DSH，完成后自动启动并打开网页。",
+        show_install_step(L"准备安装 DSH",
+                          pending_node_source_ == dsh::InstallSource::mirror
+                              ? L"Node.js 与 npm 已可用。将使用国内 npm 镜像安装 DSH，完成后自动启动并打开网页。"
+                              : L"Node.js 与 npm 已可用。将使用官方 npm 源安装 DSH，完成后自动启动并打开网页。",
                           L"开始安装", L"重选目录", L"上一步", ActionMode::install_ready);
-        set_text(footer_label_, L"DSH 目录：" + pending_dsh_directory_.wstring());
+        set_text(footer_label_, L"DSH 目录：" + pending_dsh_directory_.wstring() +
+                                    (pending_node_source_ == dsh::InstallSource::mirror
+                                         ? L" · 国内镜像"
+                                         : L" · 官方 npm 源"));
         append_action(L"Node.js 已就绪，等待确认安装 DSH");
     }
 
@@ -1771,9 +1793,9 @@ private:
 
     void start_install(const std::filesystem::path& directory, bool install_system_node = false) {
         action_mode_ = ActionMode::normal;
-        // Initial setup follows the BAT's proven default: npmmirror for DSH.
-        // The user's persisted source setting remains owned by the update page.
-        const auto source = dsh::InstallSource::mirror;
+        // The source selected in the setup wizard applies to the whole chain:
+        // Node.js (when needed) and the subsequent DSH npm installation.
+        const auto source = pending_node_source_;
         dsh::NodeInstallOptions node_options;
         node_options.install_system_node = install_system_node;
         node_options.source = pending_node_source_;
@@ -2348,6 +2370,15 @@ private:
 }  // namespace
 
 int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int show_command) {
+    int argument_count{};
+    if (auto** arguments = CommandLineToArgvW(GetCommandLineW(), &argument_count)) {
+        if (argument_count == 3 && std::wstring(arguments[1]) == L"--cleanup-directory") {
+            const bool cleaned = dsh::platform::cleanup_launcher_artifact(arguments[2]);
+            LocalFree(arguments);
+            return cleaned ? 0 : 1;
+        }
+        LocalFree(arguments);
+    }
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     // A scheduled task and a Startup-folder shortcut can otherwise launch two
     // copies at login; each copy would open the DSH page independently.

@@ -60,6 +60,49 @@ std::optional<std::string> find_dsh() {
     return path.empty() ? std::nullopt : std::optional<std::string>(path);
 }
 std::optional<std::filesystem::path> remembered_dsh_directory() { return std::nullopt; }
+DshIntegrity inspect_dsh_installation_at(const std::filesystem::path& prefix,
+                                          const std::filesystem::path& executable,
+                                          bool node_available) {
+    DshIntegrity result;
+    result.prefix = prefix;
+    result.executable = executable.string();
+    result.found = std::filesystem::exists(prefix) || std::filesystem::exists(executable);
+    result.node_available = node_available;
+    result.shim_present = std::filesystem::is_regular_file(executable);
+    const auto package = prefix / "node_modules" / "@deepseek-ai" / "dsh" / "package.json";
+    result.package_present = std::filesystem::is_regular_file(package);
+    result.transaction_pending = std::filesystem::exists(prefix / ".dsh-launcher-staging") ||
+                                 std::filesystem::exists(prefix / ".dsh-launcher-rollback");
+    if (result.node_available && result.shim_present && result.package_present) {
+        result.version = dsh_version(result.executable);
+        result.version_valid = !result.version.empty();
+        // Linux support is still a platform skeleton; package/CLI equality is
+        // enforced when its transactional installer is implemented.
+        result.version_matches_package = result.version_valid;
+    }
+    result.complete = result.node_available && result.shim_present && result.package_present &&
+                      result.version_valid && result.version_matches_package &&
+                      !result.transaction_pending;
+    if (!result.complete) {
+        if (result.transaction_pending) result.problem = "检测到未完成的安装或更新事务";
+        else if (!result.node_available) result.problem = "Node.js 缺失或无法执行";
+        else if (!result.shim_present) result.problem = "DSH 启动 shim 缺失";
+        else if (!result.package_present) result.problem = "DSH 核心包 package.json 缺失";
+        else result.problem = "dsh --version 执行失败";
+    }
+    return result;
+}
+
+DshIntegrity inspect_dsh_installation() {
+    const auto executable = find_dsh();
+    if (!executable) return {};
+    const std::filesystem::path command(*executable);
+    auto prefix = command.parent_path();
+    if (prefix.filename() == ".bin" && prefix.parent_path().filename() == "node_modules") {
+        prefix = prefix.parent_path().parent_path();
+    }
+    return inspect_dsh_installation_at(prefix, command, has_node() && !node_version().empty());
+}
 std::string dsh_version(const std::string& executable) { return capture("\"" + executable + "\" --version 2>/dev/null"); }
 std::optional<std::string> verified_dsh_version(const std::string& executable) {
     const auto version = dsh_version(executable);
@@ -117,6 +160,13 @@ bool install_managed_dsh(std::string& error) {
     return false;
 }
 bool uninstall_dsh(std::string& error) { error = "Linux 卸载流程尚未实现。"; return false; }
+bool cleanup_launcher_artifact(const std::filesystem::path& directory) {
+    if (directory.empty() || directory == directory.root_path()) return false;
+    if (directory.filename().string().rfind(".dsh-launcher-", 0) != 0) return false;
+    std::error_code filesystem_error;
+    std::filesystem::remove_all(directory, filesystem_error);
+    return !filesystem_error && !std::filesystem::exists(directory);
+}
 bool clear_conversation_memory(std::string& error) {
     error = "Linux 对话记忆清理流程将在 Linux 打包阶段接入。";
     return false;

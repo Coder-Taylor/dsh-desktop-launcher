@@ -336,7 +336,36 @@ void clear_launcher_owned_node() {
 }
 
 std::filesystem::path managed_dsh_command() {
-    return runtime_directory() / "dsh" / "dsh.cmd";
+    return runtime_directory() / "dsh" / "node_modules" / ".bin" / "dsh.cmd";
+}
+
+std::filesystem::path dsh_prefix_from_command(const std::filesystem::path& command) {
+    auto prefix = command.parent_path();
+    if (prefix.filename() == L".bin" && prefix.parent_path().filename() == L"node_modules") {
+        prefix = prefix.parent_path().parent_path();
+    }
+    return prefix;
+}
+
+std::filesystem::path dsh_command_in_prefix(const std::filesystem::path& prefix) {
+    const auto npm_shim = prefix / "node_modules" / ".bin" / "dsh.cmd";
+    if (std::filesystem::exists(npm_shim)) return npm_shim;
+    return prefix / "dsh.cmd";
+}
+
+bool has_dsh_transaction_residue(const std::filesystem::path& prefix) {
+    if (prefix.empty()) return false;
+    if (std::filesystem::exists(prefix / L".dsh-launcher-staging") ||
+        std::filesystem::exists(prefix / L".dsh-launcher-rollback")) {
+        return true;
+    }
+    std::error_code error;
+    for (const auto& entry : std::filesystem::directory_iterator(prefix, error)) {
+        if (error) break;
+        const auto name = entry.path().filename().wstring();
+        if (name.rfind(L".dsh-launcher-interrupted-", 0) == 0) return true;
+    }
+    return false;
 }
 
 // These public domestic npm registries are independently operated. We probe
@@ -347,10 +376,12 @@ constexpr std::array<const char*, 3> domestic_npm_registries{
     "https://mirrors.cloud.tencent.com/npm",
     "https://repo.huaweicloud.com/repository/npm",
 };
-// DSH 0.1.1-rc.2 publishes these app-boot runtime requirements as peer
-// dependencies. npm's normal peer resolver can loop on that graph; install
-// the required peers explicitly while using --legacy-peer-deps. See upstream
-// discussion deepseek-ai/deepseek-harness#4236 for the verified workaround.
+// npm 11 loops while placing DSH 0.1.1-rc.2's app-boot peer graph. All of
+// these packages are runtime requirements of that graph; installing them as
+// explicit roots lets legacy mode skip only the faulty automatic placement.
+// A real standard-mode smoke test on 2026-08-31 remained at the same peer
+// placement after 11 minutes and exceeded 2.4 GiB, while this bounded mode
+// had already completed npm on the Win10 beta.9 test.
 constexpr std::array<const char*, 9> dsh_runtime_peer_packages{
     "@deepseek-ai/cordis-plugin-group",
     "@deepseek-ai/cordis-plugin-loader",
@@ -367,20 +398,6 @@ constexpr const char* launcher_manifest_gitee =
     "https://gitee.com/taylorchengitee/dsh-desktop-launcher/raw/main/packaging/manifests/update-manifest.json";
 constexpr const char* launcher_manifest_github =
     "https://raw.githubusercontent.com/Coder-Taylor/dsh-desktop-launcher/main/packaging/manifests/update-manifest.json";
-
-bool has_update_memory_budget(std::string& error) {
-    MEMORYSTATUSEX memory{};
-    memory.dwLength = sizeof(memory);
-    if (!GlobalMemoryStatusEx(&memory)) return true;
-    constexpr ULONGLONG minimum_available = 3ULL * 1024 * 1024 * 1024;
-    if (memory.ullAvailPhys < minimum_available) {
-        error = "系统可用内存不足（当前约 " +
-                std::to_string(memory.ullAvailPhys / (1024 * 1024)) +
-                " MiB，至少需要 3072 MiB），已停止安装/更新以避免卡死。";
-        return false;
-    }
-    return true;
-}
 
 struct NpmMemoryPolicy {
     std::size_t job_limit{};
@@ -440,6 +457,46 @@ void remember_dsh(const std::filesystem::path& executable) {
 void clear_remembered_dsh() {
     std::error_code error;
     std::filesystem::remove(remembered_dsh_file(), error);
+}
+
+bool start_cleanup_worker(const std::filesystem::path& directory) {
+    wchar_t executable[32768]{};
+    const DWORD length = GetModuleFileNameW(nullptr, executable, static_cast<DWORD>(std::size(executable)));
+    if (length == 0 || length >= std::size(executable)) return false;
+    std::error_code filesystem_error;
+    const auto maintenance_directory = state_directory() / L"maintenance";
+    std::filesystem::create_directories(maintenance_directory, filesystem_error);
+    if (filesystem_error) return false;
+    auto worker = maintenance_directory / L"dsh-launcher-cleanup.exe";
+    // Refresh the helper from the currently running, trusted launcher. If an
+    // older helper is still cleaning and therefore locked, use a unique copy
+    // for this operation rather than executing stale or externally replaced
+    // bytes from the state directory.
+    if (!CopyFileW(executable, worker.c_str(), FALSE)) {
+        worker = maintenance_directory /
+                 (L"dsh-launcher-cleanup-" + std::to_wstring(GetCurrentProcessId()) + L"-" +
+                  std::to_wstring(GetTickCount64()) + L".exe");
+        if (!CopyFileW(executable, worker.c_str(), TRUE)) return false;
+    }
+    // Run a stable helper copy rather than the main launcher executable. A
+    // cleanup that lasts several minutes must never lock the EXE that the
+    // self-updater is about to replace.
+    std::wstring command_line = L"\"" + worker.wstring() +
+                                L"\" --cleanup-directory \"" + directory.wstring() + L"\"";
+    std::vector<wchar_t> mutable_command(command_line.begin(), command_line.end());
+    mutable_command.push_back(L'\0');
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    startup.dwFlags = STARTF_USESHOWWINDOW;
+    startup.wShowWindow = SW_HIDE;
+    PROCESS_INFORMATION process{};
+    const bool started = CreateProcessW(worker.c_str(), mutable_command.data(), nullptr, nullptr, FALSE,
+                                        CREATE_NO_WINDOW | DETACHED_PROCESS | BELOW_NORMAL_PRIORITY_CLASS,
+                                        nullptr, nullptr, &startup, &process);
+    if (!started) return false;
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    return true;
 }
 
 std::string path_utf8(const std::filesystem::path& value) {
@@ -850,6 +907,90 @@ std::filesystem::path state_directory() {
     return std::filesystem::temp_directory_path() / "DshLauncher";
 }
 
+DshIntegrity inspect_dsh_installation_at(const std::filesystem::path& prefix,
+                                         const std::filesystem::path& executable,
+                                         bool node_available) {
+    DshIntegrity result;
+    result.prefix = prefix.lexically_normal();
+    result.executable = path_utf8(executable);
+    result.found = std::filesystem::exists(result.prefix) || std::filesystem::exists(executable);
+    result.node_available = node_available;
+    result.shim_present = !executable.empty() && std::filesystem::is_regular_file(executable);
+    const auto package_file = result.prefix / "node_modules" / "@deepseek-ai" / "dsh" / "package.json";
+    result.package_present = std::filesystem::is_regular_file(package_file);
+    result.transaction_pending = has_dsh_transaction_residue(result.prefix);
+
+    std::optional<std::string> package_version;
+    if (result.package_present) {
+        std::ifstream package_stream(package_file, std::ios::binary);
+        const std::string package_text((std::istreambuf_iterator<char>(package_stream)),
+                                       std::istreambuf_iterator<char>());
+        package_version = extract_version(package_text);
+    }
+    if (result.node_available && result.shim_present && result.package_present) {
+        result.version = dsh_version(result.executable);
+        result.version_valid = !result.version.empty();
+    }
+    result.version_matches_package = result.version_valid && package_version &&
+                                     result.version == *package_version;
+    result.complete = result.node_available && result.shim_present && result.package_present &&
+                      result.version_valid && result.version_matches_package &&
+                      !result.transaction_pending;
+
+    if (result.complete) return result;
+    if (result.transaction_pending) result.problem = "检测到上次安装或更新留下的未完成事务";
+    else if (!result.node_available) result.problem = "Node.js 缺失或无法执行";
+    else if (!result.shim_present) result.problem = "DSH 启动 shim 缺失";
+    else if (!result.package_present) result.problem = "DSH 核心包 package.json 缺失";
+    else if (!package_version) result.problem = "DSH 核心包版本信息无法读取";
+    else if (!result.version_valid) result.problem = "dsh --version 执行失败";
+    else if (!result.version_matches_package) {
+        result.problem = "启动 shim 版本与核心包版本不一致（shim=" + result.version +
+                         "，核心包=" + *package_version + "）";
+    } else result.problem = "DSH 资源完整性校验失败";
+    return result;
+}
+
+DshIntegrity inspect_dsh_installation() {
+    // A recorded location is authoritative even when its shim disappeared:
+    // repairing that directory is safer than silently adopting another dsh
+    // from PATH and leaving the user's original installation corrupted.
+    {
+        std::ifstream stream(remembered_dsh_file());
+        std::string remembered;
+        std::getline(stream, remembered);
+        if (!remembered.empty()) {
+            const auto command = std::filesystem::path(utf8_to_wide(trim(remembered)));
+            auto result = inspect_dsh_installation_at(
+                dsh_prefix_from_command(command), command, has_node() && !node_version().empty());
+            result.found = true;
+            return result;
+        }
+    }
+    for (const auto& command : {managed_dsh_command(), runtime_directory() / "dsh" / "dsh.cmd"}) {
+        if (!std::filesystem::exists(command)) continue;
+        remember_dsh(command);
+        return inspect_dsh_installation_at(
+            dsh_prefix_from_command(command), command, has_node() && !node_version().empty());
+    }
+    const auto path_result = capture("where.exe dsh 2>nul");
+    const auto path_text = first_line(path_result.output);
+    if (!path_text.empty()) {
+        const auto command = std::filesystem::path(utf8_to_wide(path_text));
+        remember_dsh(command);
+        return inspect_dsh_installation_at(
+            dsh_prefix_from_command(command), command, has_node() && !node_version().empty());
+    }
+    const auto default_prefix = default_dsh_directory();
+    if (std::filesystem::exists(default_prefix)) {
+        auto result = inspect_dsh_installation_at(
+            default_prefix, dsh_command_in_prefix(default_prefix), has_node() && !node_version().empty());
+        result.found = true;
+        return result;
+    }
+    return {};
+}
+
 std::optional<std::string> find_dsh() {
     {
         std::ifstream stream(remembered_dsh_file());
@@ -863,6 +1004,11 @@ std::optional<std::string> find_dsh() {
     if (std::filesystem::exists(managed)) {
         remember_dsh(managed);
         return path_utf8(managed);
+    }
+    const auto legacy_managed = runtime_directory() / "dsh" / "dsh.cmd";
+    if (std::filesystem::exists(legacy_managed)) {
+        remember_dsh(legacy_managed);
+        return path_utf8(legacy_managed);
     }
     const auto result = capture("where.exe dsh 2>nul");
     const auto path = first_line(result.output);
@@ -905,7 +1051,6 @@ std::filesystem::path default_dsh_directory() { return runtime_directory() / "ds
 
 bool install_managed_node(bool official_source, std::string& error,
                           const std::atomic_bool* cancel) {
-    if (!has_update_memory_budget(error)) return false;
     const auto runtime = runtime_directory();
     const auto target = managed_node_directory();
     const auto staging = runtime / "node-installing";
@@ -1080,9 +1225,58 @@ bool install_dsh_at(const std::filesystem::path& prefix, bool official_source, s
         L"node_modules", L"package.json", L"package-lock.json"};
     const auto staging = prefix / L".dsh-launcher-staging";
     const auto rollback = prefix / L".dsh-launcher-rollback";
-    const auto retired_backup = prefix / (L".dsh-launcher-retired-" +
-                                           std::to_wstring(GetCurrentProcessId()) + L"-" +
-                                           std::to_wstring(GetTickCount64()));
+    std::uint32_t retired_sequence{};
+    const auto next_retired_path = [&](const std::wstring& kind) {
+        return prefix / (L".dsh-launcher-retired-" + kind + L"-" +
+                         std::to_wstring(GetCurrentProcessId()) + L"-" +
+                         std::to_wstring(GetTickCount64()) + L"-" +
+                         std::to_wstring(retired_sequence++));
+    };
+    // Never recursively delete a partly installed node_modules tree on the UI
+    // path. Renaming within the same volume is atomic and fast; retired trees
+    // are ignored by integrity checks and removed by a hidden maintenance
+    // process without blocking installation, cancellation or startup.
+    const auto retire_directory = [&](const std::filesystem::path& directory,
+                                      const std::wstring& kind,
+                                      const std::string& description) {
+        filesystem_error.clear();
+        if (!std::filesystem::exists(directory, filesystem_error)) return !filesystem_error;
+        if (std::filesystem::is_empty(directory, filesystem_error) && !filesystem_error) {
+            std::filesystem::remove(directory, filesystem_error);
+            if (!filesystem_error) return true;
+        }
+        filesystem_error.clear();
+        const auto retired = next_retired_path(kind);
+        std::filesystem::rename(directory, retired, filesystem_error);
+        if (filesystem_error) {
+            error = description + "，但无法将残留目录隔离：" + filesystem_error.message();
+            return false;
+        }
+        if (start_cleanup_worker(retired)) {
+            report(description + "，残留文件已转入无窗口后台清理");
+        } else {
+            report(description + "，残留文件已隔离；后台清理未启动，可稍后手动删除：" + path_utf8(retired));
+        }
+        return true;
+    };
+    // beta.9 could leave these directories behind if the launcher was closed
+    // during recovery. They are neither the live installation nor a rollback
+    // marker, so isolate them before deciding the current transaction state.
+    std::vector<std::filesystem::path> interrupted_residue;
+    for (const auto& entry : std::filesystem::directory_iterator(prefix, filesystem_error)) {
+        if (filesystem_error) break;
+        const auto name = entry.path().filename().wstring();
+        if (name.rfind(L".dsh-launcher-interrupted-", 0) == 0) {
+            interrupted_residue.push_back(entry.path());
+        }
+    }
+    if (filesystem_error) {
+        error = "无法检查 DSH 安装事务残留：" + filesystem_error.message();
+        return false;
+    }
+    for (const auto& residue : interrupted_residue) {
+        if (!retire_directory(residue, L"interrupted", "已隔离上次中断恢复留下的文件")) return false;
+    }
     const auto recover_interrupted_commit = [&] {
         if (!std::filesystem::exists(rollback)) return true;
         // beta.9 used remove_all on this backup after a successful swap. If
@@ -1097,16 +1291,12 @@ bool install_dsh_at(const std::filesystem::path& prefix, bool official_source, s
                                      std::filesystem::exists(saved_shim) &&
                                      !dsh_version(path_utf8(saved_shim)).empty();
         if (!backup_complete) {
-            std::filesystem::rename(rollback, retired_backup, filesystem_error);
-            if (filesystem_error) {
-                error = "检测到不完整的旧 DSH 备份，但无法将其隔离：" + filesystem_error.message();
-                return false;
-            }
-            report("已忽略上次中断时残留的不完整旧备份，保留已校验的新 DSH 文件");
-            return true;
+            return retire_directory(rollback, L"rollback",
+                                    "已忽略上次中断时残留的不完整旧备份，保留当前 DSH 文件");
         }
         const auto interrupted = prefix / (L".dsh-launcher-interrupted-" +
-                                           std::to_wstring(GetCurrentProcessId()));
+                                           std::to_wstring(GetCurrentProcessId()) + L"-" +
+                                           std::to_wstring(GetTickCount64()));
         std::filesystem::create_directories(interrupted, filesystem_error);
         if (filesystem_error) {
             error = "检测到未完成的 DSH 更新，但无法创建恢复目录：" + filesystem_error.message();
@@ -1129,9 +1319,12 @@ bool install_dsh_at(const std::filesystem::path& prefix, bool official_source, s
                 return false;
             }
         }
-        std::filesystem::remove_all(rollback, filesystem_error);
-        if (filesystem_error) {
+        std::filesystem::remove(rollback, filesystem_error);
+        if (filesystem_error || std::filesystem::exists(rollback)) {
             error = "已恢复 DSH 文件，但无法清理恢复标记：" + filesystem_error.message();
+            return false;
+        }
+        if (!retire_directory(interrupted, L"interrupted", "已保留被恢复操作替换的中断文件")) {
             return false;
         }
         report("已恢复上次中断更新前的 DSH 程序文件");
@@ -1139,11 +1332,7 @@ bool install_dsh_at(const std::filesystem::path& prefix, bool official_source, s
     };
     if (!recover_interrupted_commit()) return false;
     if (std::filesystem::exists(staging)) {
-        std::filesystem::remove_all(staging, filesystem_error);
-        if (filesystem_error) {
-            error = "无法清理上次未完成的 DSH 临时安装目录：" + filesystem_error.message();
-            return false;
-        }
+        if (!retire_directory(staging, L"staging", "已隔离上次未完成的 DSH 临时安装")) return false;
     }
     std::filesystem::create_directories(staging, filesystem_error);
     if (filesystem_error) {
@@ -1291,12 +1480,11 @@ bool install_dsh_at(const std::filesystem::path& prefix, bool official_source, s
     report("npm 内存保护：V8 上限=" + std::to_string(memory_policy.v8_heap_mib) +
            " MiB；任务组上限=" + std::to_string(mib(memory_policy.job_limit)) + " MiB");
     const auto run_attempt = [&](const char* registry, bool official_fallback) {
-        report(std::string("正在通过 ") + registry + " 更新 DSH（已补齐运行时 peer 依赖）");
-        // The regular npm peer resolver loops on DSH 0.1.1-rc.2's app-boot
-        // graph. The peer packages above are explicit, so legacy mode skips
-        // only the faulty automatic peer resolution, not the required files.
-        // Keep one bounded task, cancellation, per-fetch limits and the Job
-        // memory limit around this workaround.
+        report(std::string("正在通过 ") + registry + " 安装 DSH（已补齐运行时 peer 依赖）");
+        // The normal npm 11 peer resolver loops on DSH's app-boot graph. The
+        // required peer packages above are explicit, so legacy mode skips the
+        // faulty automatic placement without omitting those runtime files.
+        // Cancellation, timeout and dynamic Job/V8 limits bound the task.
         const auto result = capture(make_command(registry, official_fallback), 15 * 60 * 1000,
                                     memory_policy.job_limit, cancel, report);
         const auto summary = summarize(registry, result);
@@ -1337,7 +1525,7 @@ bool install_dsh_at(const std::filesystem::path& prefix, bool official_source, s
         if (!npm_debug_tail.empty()) {
             error += "\nnpm 调试日志末尾：\n" + npm_debug_tail;
         }
-        std::filesystem::remove_all(staging, filesystem_error);
+        retire_directory(staging, L"staging", "DSH 下载失败");
         return false;
     }
     const auto staged_version = first_line(capture("set \"PATH=" + node_path + ";%PATH%\" && \"" +
@@ -1347,12 +1535,12 @@ bool install_dsh_at(const std::filesystem::path& prefix, bool official_source, s
                 (requested_version.empty() ? std::string("可执行版本") : requested_version) +
                 "，实际 " + (staged_version.empty() ? std::string("未知") : staged_version) +
                 "；原 DSH 未修改。";
-        std::filesystem::remove_all(staging, filesystem_error);
+        retire_directory(staging, L"staging", "DSH 隔离目录版本校验失败");
         return false;
     }
     if (cancel && cancel->load()) {
         error = "用户已取消更新，原 DSH 程序文件未修改。";
-        std::filesystem::remove_all(staging, filesystem_error);
+        retire_directory(staging, L"staging", "DSH 安装已取消");
         return false;
     }
 
@@ -1360,7 +1548,7 @@ bool install_dsh_at(const std::filesystem::path& prefix, bool official_source, s
     std::filesystem::create_directories(rollback, filesystem_error);
     if (filesystem_error) {
         error = "无法创建 DSH 更新备份目录，已取消替换：" + filesystem_error.message();
-        std::filesystem::remove_all(staging, filesystem_error);
+        retire_directory(staging, L"staging", "无法创建更新备份目录");
         return false;
     }
     std::vector<const wchar_t*> original_moved;
@@ -1409,8 +1597,8 @@ bool install_dsh_at(const std::filesystem::path& prefix, bool official_source, s
     if (!error.empty()) {
         const auto restore_error = restore_live_program_files();
         if (!restore_error.empty()) error += "；自动恢复旧 DSH 文件失败：" + restore_error;
-        std::filesystem::remove_all(staging, filesystem_error);
-        if (restore_error.empty()) std::filesystem::remove_all(rollback, filesystem_error);
+        retire_directory(staging, L"staging", "DSH 文件替换失败");
+        if (restore_error.empty()) retire_directory(rollback, L"rollback", "旧 DSH 文件已恢复");
         return false;
     }
     auto installed = prefix / "node_modules" / ".bin" / "dsh.cmd";
@@ -1423,26 +1611,18 @@ bool install_dsh_at(const std::filesystem::path& prefix, bool official_source, s
         error = "新 DSH 文件替换后版本校验失败，正在恢复旧版本。";
         const auto restore_error = restore_live_program_files();
         if (!restore_error.empty()) error += "自动恢复旧 DSH 文件失败：" + restore_error;
-        std::filesystem::remove_all(staging, filesystem_error);
-        if (restore_error.empty()) std::filesystem::remove_all(rollback, filesystem_error);
+        retire_directory(staging, L"staging", "新 DSH 版本校验失败");
+        if (restore_error.empty()) retire_directory(rollback, L"rollback", "旧 DSH 文件已恢复");
         return false;
     }
     // Directory rename is atomic on this volume. Do not recursively delete an
     // old node_modules tree while the user is waiting: on HDDs it can take
-    // many minutes and made beta.9 look permanently stuck. The retired backup
-    // is intentionally left for later maintenance, never touched on startup.
-    std::filesystem::rename(rollback, retired_backup, filesystem_error);
-    if (filesystem_error) {
-        error = "新 DSH 已通过校验，但无法把旧备份转入延后清理：" + filesystem_error.message();
-        return false;
-    }
-    std::filesystem::remove_all(staging, filesystem_error);
-    if (filesystem_error) {
-        error = "DSH 已更新，但无法清理隔离目录：" + filesystem_error.message();
-        return false;
-    }
+    // many minutes and made beta.9 look permanently stuck. A hidden worker
+    // removes the retired backup after the foreground operation completes.
+    if (!retire_directory(rollback, L"rollback", "新 DSH 已通过校验，旧备份不再参与恢复")) return false;
+    if (!retire_directory(staging, L"staging", "DSH 隔离安装已完成")) return false;
     remember_dsh(installed);
-    report("DSH 程序文件已安全替换并通过版本校验；旧备份已转入延后清理");
+    report("DSH 程序文件已安全替换并通过版本校验；旧备份已转入无窗口后台清理");
     return true;
 }
 
@@ -1452,6 +1632,7 @@ bool uninstall_dsh(std::string& error) {
     std::ifstream stream(remembered_dsh_file());
     std::string remembered_text;
     std::getline(stream, remembered_text);
+    stream.close();
     if (remembered_text.empty()) {
         error = "没有找到启动器记录的 DSH 安装目录。";
         return false;
@@ -1461,15 +1642,45 @@ bool uninstall_dsh(std::string& error) {
     if (prefix.filename() == L".bin" && prefix.parent_path().filename() == L"node_modules") {
         prefix = prefix.parent_path().parent_path();
     }
+    if (prefix.empty() || prefix == prefix.root_path()) {
+        error = "DSH 安装目录不安全，已拒绝卸载。";
+        return false;
+    }
     std::error_code filesystem_error;
+    const auto quarantine_name = L".dsh-launcher-uninstalling-" +
+                                 std::to_wstring(GetCurrentProcessId()) + L"-" +
+                                 std::to_wstring(GetTickCount64());
+    std::filesystem::path quarantine;
     if (prefix == default_dsh_directory()) {
-        std::filesystem::remove_all(prefix, filesystem_error);
+        quarantine = prefix.parent_path() / quarantine_name;
+        std::filesystem::rename(prefix, quarantine, filesystem_error);
     } else {
-        std::filesystem::remove_all(prefix / "node_modules" / "@deepseek-ai" / "dsh", filesystem_error);
-        filesystem_error.clear();
-        for (const auto& name : {"dsh.cmd", "dsh.ps1", "dsh"}) {
-            std::filesystem::remove(prefix / "node_modules" / ".bin" / name, filesystem_error);
-            filesystem_error.clear();
+        // install_dsh_at owns and atomically replaces these complete program
+        // artifacts even in a custom prefix. Removing only @deepseek-ai/dsh
+        // used to leave hundreds of explicitly installed runtime peers and old
+        // rollback trees behind. Preserve unrelated user files in the chosen
+        // directory, but isolate every launcher-owned program/transaction tree.
+        quarantine = prefix / quarantine_name;
+        std::filesystem::create_directories(quarantine, filesystem_error);
+        for (const auto* name : {L"node_modules", L"package.json", L"package-lock.json"}) {
+            if (filesystem_error) break;
+            const auto artifact = prefix / name;
+            if (!std::filesystem::exists(artifact)) continue;
+            std::filesystem::rename(artifact, quarantine / name, filesystem_error);
+        }
+        if (!filesystem_error) {
+            std::vector<std::filesystem::path> transaction_artifacts;
+            for (const auto& entry : std::filesystem::directory_iterator(prefix, filesystem_error)) {
+                if (filesystem_error) break;
+                const auto name = entry.path().filename().wstring();
+                if (entry.path() != quarantine && name.rfind(L".dsh-launcher-", 0) == 0) {
+                    transaction_artifacts.push_back(entry.path());
+                }
+            }
+            for (const auto& artifact : transaction_artifacts) {
+                if (filesystem_error) break;
+                std::filesystem::rename(artifact, quarantine / artifact.filename(), filesystem_error);
+            }
         }
     }
     if (filesystem_error) {
@@ -1481,7 +1692,20 @@ bool uninstall_dsh(std::string& error) {
         return false;
     }
     clear_remembered_dsh();
+    if (!start_cleanup_worker(quarantine)) {
+        error = "DSH 程序已卸载，但无法启动后台残留文件清理；隔离目录：" + path_utf8(quarantine);
+        return false;
+    }
     return true;
+}
+
+bool cleanup_launcher_artifact(const std::filesystem::path& directory) {
+    if (directory.empty() || directory == directory.root_path()) return false;
+    const auto name = directory.filename().wstring();
+    if (name.rfind(L".dsh-launcher-", 0) != 0) return false;
+    std::error_code filesystem_error;
+    std::filesystem::remove_all(directory, filesystem_error);
+    return !filesystem_error && !std::filesystem::exists(directory);
 }
 
 bool clear_conversation_memory(std::string& error) {
@@ -1550,7 +1774,7 @@ bool uninstall_launcher_owned_node(std::string& error) {
 }
 
 std::string dsh_version(const std::string& executable) {
-    const auto node_path = path_utf8(managed_node_directory());
+    const auto node_path = path_utf8(preferred_node_directory());
     return first_line(capture("set \"PATH=" + node_path + ";%PATH%\" && \"" + executable + "\" --version 2>nul").output);
 }
 
